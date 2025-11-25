@@ -1,0 +1,14 @@
+{
+  "name": "@chenyfan/easywgsync",
+  "version": "0.0.0",
+  "description": "Sync Wireguard Config in different Wireguard Client",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "Wireguard"
+  ],
+  "author": "CyanFalse",
+  "license": "GPL-3.0-or-later"
+}
