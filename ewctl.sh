@@ -7,8 +7,8 @@ DEPENDENCIES=(wireguard openresolv net-tools iptables)
 
 install_dependencies() {
     echo "正在安装依赖..."
-    #apt update
     apt install -y "${DEPENDENCIES[@]}"
+    mkdir -p /etc/wireguard
 }
 install_ewctl() {
     echo "正在安装 ewctl..."
@@ -52,20 +52,17 @@ EasyWireGuardSync() {
     local PEER_NAME=${CONFIG_PARAMS[3]}
     local URL="https://${SERVER_IP_PORT}/api/getPeerConfig?secret=${SECRET}&peername=${PEER_NAME}"
     echo "获取配置的URL: ${URL}"
-    local TEMP_CONFIG="/tmp/${PEER_NAME}_wg0.conf"
-    curl -k -s -o "${TEMP_CONFIG}" "${URL}"
-    if [[ $? -ne 0 || ! -s "${TEMP_CONFIG}" ]]; then
+    local CONFIG_DIR="/etc/wireguard/${WG_INTERFACE}.conf"
+    curl "${URL}" > "${CONFIG_DIR}"
+    if [[ $? -ne 0 || ! -s "${CONFIG_DIR}" ]]; then
         echo "错误: 无法下载配置文件或文件为空。"
         return 1
     fi
-    echo "配置文件已下载到 ${TEMP_CONFIG}"
-    #检查wg接口是否存在
     if ip link show "${WG_INTERFACE}" &> /dev/null; then
         echo "接口 ${WG_INTERFACE} 已存在，正在更新配置..."
-        wg syncconf "${WG_INTERFACE}" "${TEMP_CONFIG}"
+        wg syncconf ${WG_INTERFACE} <(wg-quick strip ${CONFIG_DIR})
     else
         echo "接口 ${WG_INTERFACE} 不存在，正在创建..."
-        cp "${TEMP_CONFIG}" "/etc/wireguard/${WG_INTERFACE}.conf"
         wg-quick up "${WG_INTERFACE}"
     fi
     if [[ $? -ne 0 ]]; then
