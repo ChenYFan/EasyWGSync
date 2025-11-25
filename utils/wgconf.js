@@ -29,7 +29,6 @@ const getWGPeerNames = async (apiurl, apikey, configname) => {
 }
 
 const getWGShowConnectionEndpoints = async (configname) => {
-    configname = "cnca"
     const result = await bash('wg', ['show', configname, 'endpoints']);
     if (result.code !== 0) { return {} }
     const lines = result.stdout.trim().split('\n');
