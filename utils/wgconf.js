@@ -101,7 +101,6 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
                 const realEndpoint = tags.find(tag => tag.startsWith('Real%')).replace('Real%', '');
                 RawPeerConfigs[peerPubKey].Endpoint = realEndpoint;
             }
-            continue;
         }
         if(tags.includes('NotDefaultPersistentKeepalive')){
             delete RawPeerConfigs[peerPubKey]["PersistentKeepalive"]
@@ -109,6 +108,9 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
                 const realPK = tags.find(tag => tag.startsWith('RealPersistentKeepalive%')).replace('RealPersistentKeepalive%', '');
                 RawPeerConfigs[peerPubKey]["PersistentKeepalive"] = realPK;
             }
+        }
+        if(RawPeerConfigs[peerPubKey].Endpoint === undefined || RawPeerConfigs[peerPubKey].Endpoint.includes('none')){
+            delete RawPeerConfigs[peerPubKey].Endpoint;
         }
     }
     //4. 拼接最终的配置
