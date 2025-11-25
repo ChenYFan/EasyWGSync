@@ -121,7 +121,7 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
         }
         result += `\n`;
     }
-    result += `\n===以上为FullMesh节点配置===\n`;
+    result += `\n#===以上为FullMesh节点配置===\n`;
     return result
 
 }
