@@ -12,7 +12,7 @@ install_dependencies() {
 }
 install_ewctl() {
     echo "正在安装 ewctl..."
-    cp "$0" "$EWCTL_PATH"
+    /usr/bin/cp -f "$0" "$EWCTL_PATH"
     chmod +x "$EWCTL_PATH"
     install_dependencies
     echo "ewctl installed to $EWCTL_PATH"
