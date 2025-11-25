@@ -18,7 +18,7 @@ const server = http.createServer(async (req, res) => {
     const URLPath = URLObject.pathname;
     const URLParams = URLObject.searchParams;
     const ReqHeader = req.headers;
-    const RealIP = ReqHeader['X-Real-IP'] || req.socket.remoteAddress;
+    const RealIP = ReqHeader['x-real-ip'] || ReqHeader['x-forwarded-for'] || req.socket.remoteAddress;
     const secret = URLParams.get('secret');
 
     log.debug(`From ${RealIP} Received request: ${URLPath} with params: ${URLParams.toString()}`);

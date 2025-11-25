@@ -42,6 +42,39 @@ register_crontab() {
     (crontab -l 2>/dev/null; echo "*/2 * * * * $EWCTL_PATH 2") | crontab -
     echo "已注册定时任务，每2分钟运行一次 ewctl。"
 }
+EasyWireGuardSync() {
+    local CONFIG_PARAMS=("$@")
+    echo "执行 EasyWireGuardSync 主函数，参数: ${CONFIG_PARAMS[*]}"
+    #args WireguardInterfaceName ip:port secret peername
+    local WG_INTERFACE=${CONFIG_PARAMS[0]}
+    local SERVER_IP_PORT=${CONFIG_PARAMS[1]}
+    local SECRET=${CONFIG_PARAMS[2]}
+    local PEER_NAME=${CONFIG_PARAMS[3]}
+    local URL="https://${SERVER_IP_PORT}/api/getPeerConfig?secret=${SECRET}&peername=${PEER_NAME}"
+    echo "获取配置的URL: ${URL}"
+    local TEMP_CONFIG="/tmp/${PEER_NAME}_wg0.conf"
+    curl -k -s -o "${TEMP_CONFIG}" "${URL}"
+    if [[ $? -ne 0 || ! -s "${TEMP_CONFIG}" ]]; then
+        echo "错误: 无法下载配置文件或文件为空。"
+        return 1
+    fi
+    echo "配置文件已下载到 ${TEMP_CONFIG}"
+    #检查wg接口是否存在
+    if ip link show "${WG_INTERFACE}" &> /dev/null; then
+        echo "接口 ${WG_INTERFACE} 已存在，正在更新配置..."
+        wg syncconf "${WG_INTERFACE}" "${TEMP_CONFIG}"
+    else
+        echo "接口 ${WG_INTERFACE} 不存在，正在创建..."
+        cp "${TEMP_CONFIG}" "/etc/wireguard/${WG_INTERFACE}.conf"
+        wg-quick up "${WG_INTERFACE}"
+    fi
+    if [[ $? -ne 0 ]]; then
+        echo "错误: 无法应用 WireGuard 配置。"
+        return 1
+    fi
+    echo "WireGuard 配置已成功应用。"
+    return 0
+}
 case $ACTION in
     0)
         install_ewctl
@@ -83,35 +116,3 @@ case $ACTION in
         ;;
 esac
 
-EasyWireGuardSync() {
-    local CONFIG_PARAMS=("$@")
-    echo "执行 EasyWireGuardSync 主函数，参数: ${CONFIG_PARAMS[*]}"
-    #args WireguardInterfaceName ip:port secret peername
-    local WG_INTERFACE=${CONFIG_PARAMS[0]}
-    local SERVER_IP_PORT=${CONFIG_PARAMS[1]}
-    local SECRET=${CONFIG_PARAMS[2]}
-    local PEER_NAME=${CONFIG_PARAMS[3]}
-    local URL="https://${SERVER_IP_PORT}/api/getPeerConfig?secret=${SECRET}&peername=${PEER_NAME}"
-    echo "获取配置的URL: ${URL}"
-    local TEMP_CONFIG="/tmp/${PEER_NAME}_wg0.conf"
-    curl -k -s -o "${TEMP_CONFIG}" "${URL}"
-    if [[ $? -ne 0 || ! -s "${TEMP_CONFIG}" ]]; then
-        echo "错误: 无法下载配置文件或文件为空。"
-        return 1
-    fi
-    echo "配置文件已下载到 ${TEMP_CONFIG}"
-    #检查wg接口是否存在
-    if ip link show "${WG_INTERFACE}" &> /dev/null; then
-        echo "接口 ${WG_INTERFACE} 已存在，正在更新配置..."
-        wg syncconf "${WG_INTERFACE}" "${TEMP_CONFIG}"
-    else
-        echo "接口 ${WG_INTERFACE} 不存在，正在创建..."
-        wg-quick up "${TEMP_CONFIG}"
-    fi
-    if [[ $? -ne 0 ]]; then
-        echo "错误: 无法应用 WireGuard 配置。"
-        return 1
-    fi
-    echo "WireGuard 配置已成功应用。"
-    return 0
-}
