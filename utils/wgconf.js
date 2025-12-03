@@ -49,7 +49,7 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
     let result = (await getWGPeerConf(apiurl, apikey, configname)).find(peer => peer.fileName === peername)?.file;
     if (!result) { return ""; }
     result = result.replace(/DNS \=/, "# DNS =")
-    .replace(`[Interface]`, `# ===以下为原始配置===\n[Interface]\nListenPort = 40399`+`PreUp = "${env.EXTRA_SCRIPTS.PRE_UP}"\nPostUp = "${env.EXTRA_SCRIPTS.POST_UP}"\nPreDown = "${env.EXTRA_SCRIPTS.PRE_DOWN}"\nPostDown = "${env.EXTRA_SCRIPTS.POST_DOWN}"\n`);
+    .replace(`[Interface]`, `# ===以下为原始配置===\n[Interface]\nListenPort = 40399\n`+`PreUp = "${env.EXTRA_SCRIPTS.PRE_UP}"\nPostUp = "${env.EXTRA_SCRIPTS.POST_UP}"\nPreDown = "${env.EXTRA_SCRIPTS.PRE_DOWN}"\nPostDown = "${env.EXTRA_SCRIPTS.POST_DOWN}"\n`);
 
     result += '\n\n# ===以上为原始配置，接下来为FullMesh节点配置===\n';
     const PriKey = result.match(/PrivateKey = (.+)/)[1].trim();
