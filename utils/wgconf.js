@@ -48,7 +48,7 @@ const getWGPubKeyFromPrivKey = async (privKey) => {
 const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
     let result = (await getWGPeerConf(apiurl, apikey, configname)).find(peer => peer.fileName === peername)?.file;
     if (!result) { return ""; }
-    result = result.replace(`[Interface]`, `# ===以下为原始配置===\n[Interface]\nListenPort = 40399`);
+    result = result.replace(`[Interface]`, `# ===以下为原始配置===\n[Interface]\nListenPort = 40399`).replace(/DNS \=/, "# DNS =");
     result += '\n\n# ===以上为原始配置，接下来为FullMesh节点配置===\n';
     const PriKey = result.match(/PrivateKey = (.+)/)[1].trim();
     const PubKey = await getWGPubKeyFromPrivKey(PriKey);
@@ -123,7 +123,7 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
         result += `\n`;
     }
     result += `\n#===以上为FullMesh节点配置===\n`;
-    result = result.replace(/^DNS \=/,"# DNS =");
+
     return result
 
 }
