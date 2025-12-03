@@ -102,14 +102,14 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
                 RawPeerConfigs[peerPubKey].Endpoint = realEndpoint;
             }
         }
-        if(tags.includes('NotDefaultPersistentKeepalive')){
+        if (tags.includes('NotDefaultPersistentKeepalive')) {
             delete RawPeerConfigs[peerPubKey]["PersistentKeepalive"]
-            if(tags.find(tag => tag.startsWith('RealPersistentKeepalive%'))){
+            if (tags.find(tag => tag.startsWith('RealPersistentKeepalive%'))) {
                 const realPK = tags.find(tag => tag.startsWith('RealPersistentKeepalive%')).replace('RealPersistentKeepalive%', '');
                 RawPeerConfigs[peerPubKey]["PersistentKeepalive"] = realPK;
             }
         }
-        if(RawPeerConfigs[peerPubKey].Endpoint === undefined || RawPeerConfigs[peerPubKey].Endpoint.includes('none')){
+        if (RawPeerConfigs[peerPubKey].Endpoint === undefined || RawPeerConfigs[peerPubKey].Endpoint.includes('none')) {
             delete RawPeerConfigs[peerPubKey].Endpoint;
         }
     }
@@ -123,6 +123,7 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
         result += `\n`;
     }
     result += `\n#===以上为FullMesh节点配置===\n`;
+    result = result.replace(/^DNS \=/,"# DNS =");
     return result
 
 }
