@@ -47,12 +47,16 @@ const getWGPubKeyFromPrivKey = async (privKey) => {
 const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
     let result = (await getWGPeerConf(apiurl, apikey, configname)).find(peer => peer.fileName === peername)?.file;
     if (!result) { return ""; }
+    console.log(result);
 
     const PriKey = result.match(/PrivateKey = (.+)/)[1].trim();
     const PubKey = await getWGPubKeyFromPrivKey(PriKey);
 
     result = "# ===EasyWGSync托管，以下为原始配置=== #\n" + result
     if (!env.GLOBAL_DNS) result = result.replace(/DNS \=/, "# DNS =")
+    if (!!env.GLOBAL_LISTEN_PORT) {
+        result = result.replace(/^ListenPort \= .+/m, "").replace(/\[Interface\]/, match => `[Interface]\nListenPort = ${env.GLOBAL_LISTEN_PORT}`);
+    }
 
     if (!!env.GLOBAL_SCRIPTS) {
         //寻找原始PreUp、PostUp、PreDown、PostDown，先注释
@@ -87,6 +91,7 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
             else if (!!centralNodeConfig.ENDPOINT) result = result.replace(/Endpoint \= .+/, `Endpoint = ${centralNodeConfig.ENDPOINT}`);
             if (!!centralNodeConfig.PERSISTENT_KEEPALIVE) result = result.replace(/PersistentKeepalive \= .+/, `PersistentKeepalive = ${centralNodeConfig.PERSISTENT_KEEPALIVE}`);
         }
+        //这里不处理AllowedIPS，因为这一部分应当由WGDashboard配置。但这依旧在P2P中控制，以应对各种奇怪的需求。
     }
 
     result += '\n\n# ===以上为原始配置，接下来为P2P网络(MeshGroup)节点配置=== #\n';
@@ -128,9 +133,9 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
         //ENDPOINT处理
         if (env.EXTRA_CONFIG[PeerPubKey].ENDPOINT === "none") delete RawPeerConfigs[PeerPubKey].Endpoint; //移除Endpoint，避免一部分在内网的节点或者本地地址污染其他节点的连接
         else if (!!env.EXTRA_CONFIG[PeerPubKey].ENDPOINT) RawPeerConfigs[PeerPubKey].Endpoint = env.EXTRA_CONFIG[PeerPubKey].ENDPOINT; //指定Endpoint，这是GLOBAL指定。因为有可能中心节点使用其他地址连接到该节点
-        //ALLOWED_IPS处理，但这里并不推荐使用，AllowedIPs应该在对端节点的P2P_CONFIG中设置
+        //ALLOWED_IPS处理，但这里并不推荐使用，AllowedIPs应该在对端节点的P2P_CONFIG中设置。不过还是考虑到HybridMesh的一些诡异情况（比如GCP走Oracle出口，强制所有流量都走Oracle过）
         if (!!env.EXTRA_CONFIG[PeerPubKey].ALLOWED_IPS) RawPeerConfigs[PeerPubKey].AllowedIPs = env.EXTRA_CONFIG[PeerPubKey].ALLOWED_IPS.join(', ');
-        //PERSISTENT_KEEPALIVE不应当在这里处理，应当由wgdashboard管理
+        //PERSISTENT_KEEPALIVE就不应当在这里处理，应当由wgdashboard管理
     }
 
     if (PubKey in env.EXTRA_CONFIG && env.EXTRA_CONFIG[PubKey].P2P_CONFIG) {
@@ -145,7 +150,7 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
             //ALLOWED_IPS处理
             if (!!p2pConfig.ALLOWED_IPS) RawPeerConfigs[PeerPubKey].AllowedIPs = p2pConfig.ALLOWED_IPS.join(', ');
             //PERSISTENT_KEEPALIVE处理
-            if (!!p2pConfig.PERSISTENT_KEEPALIVE) RawPeerConfigs[PeerPubKey].PersistentKeepalive = p2pConfig.PERSISTENT_KEEPALIVE;
+            RawPeerConfigs[PeerPubKey].PersistentKeepalive = !!p2pConfig.PERSISTENT_KEEPALIVE ? p2pConfig.PERSISTENT_KEEPALIVE : "21";
         }
     }
     //2.2 然后处理MESH_GROUPS部分
