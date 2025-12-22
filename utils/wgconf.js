@@ -169,6 +169,13 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
         }
     }
 
+    //2.3 补充keepalive，MeshPeers中的节点如果没有设置PERSISTENT_KEEPALIVE则默认设置为21秒
+    for (let peerPubKey of MeshPeers) {
+        if (!RawPeerConfigs[peerPubKey].PersistentKeepalive) {
+            RawPeerConfigs[peerPubKey].PersistentKeepalive = "21";
+        }
+    }
+
 
     //3. 最后将MeshPeers中的节点配置添加到结果中
 
