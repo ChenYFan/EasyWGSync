@@ -47,7 +47,6 @@ const getWGPubKeyFromPrivKey = async (privKey) => {
 const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
     let result = (await getWGPeerConf(apiurl, apikey, configname)).find(peer => peer.fileName === peername)?.file;
     if (!result) { return ""; }
-    console.log(result);
 
     const PriKey = result.match(/PrivateKey = (.+)/)[1].trim();
     const PubKey = await getWGPubKeyFromPrivKey(PriKey);
@@ -78,10 +77,15 @@ const getWGPeerFullMeshConf = async (apiurl, apikey, configname, peername) => {
             for (let scriptType in extraConfig.SCRIPTS) {
                 const scriptContent = extraConfig.SCRIPTS[scriptType];
                 if (!!scriptContent && scriptContent.trim() !== "") {
-                    result = result.replace(new RegExp(`^(${scriptType}) \\= .+`, 'gm'), match => `# 以下配置被EasyWGSync(Peer)禁用 ${match}`).replace(/\[Peer\]/, match => `${scriptType} = ${scriptContent}\n${match}`);
+                    if (scriptContent.indexOf('$GLOBAL') !== -1) scriptContent.replace(/\$GLOBAL/g, env.GLOBAL_SCRIPTS[scriptType] || '');
+                    result = result.replace(new RegExp(`^(${scriptType}) \\= .+`, 'gm'), match => `# 以下配置被EasyWGSync(Peer)禁用 ${match}`);
+                    if (scriptContent !== "none") result = result.replace(/\[Peer\]/, match => `${scriptType} = ${scriptContent}\n${match}`);
                 }
             }
         }
+        if (!!extraConfig.DNS) result = result.replace(/^(DNS) \= .+/m, match => `# 以下配置被EasyWGSync(Peer)禁用 ${match}`).replace(/\[Interface\]/, match => `[Interface]\nDNS = ${extraConfig.DNS}`);
+        if (!!extraConfig.LISTEN_PORT) result = result.replace(/^ListenPort \= .+/m, match => `# 以下配置被EasyWGSync(Peer)禁用 ${match}`).replace(/\[Interface\]/, match => `[Interface]\nListenPort = ${extraConfig.LISTEN_PORT}`);
+
         if (!!extraConfig.P2P_CONFIG && !!extraConfig.P2P_CONFIG['CENTRAL_NODE']) {
             //与中心节点的P2P配置
             const centralNodeConfig = extraConfig.P2P_CONFIG['CENTRAL_NODE'];
