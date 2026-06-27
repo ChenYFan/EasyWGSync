@@ -1,51 +1,67 @@
 import { configService } from '~/server/services/config-service'
-import { fetchAllPeers, fetchRawConfig } from '~/server/services/wg-dashboard'
+import { fetchAllPeers, fetchGlobalDefaults, fetchInterfaceInfo, fetchRawConfig } from '~/server/services/wg-dashboard'
 import { getShowEndpoints, derivePubKey } from '~/server/services/wireguard'
+import { parsePeerConf, buildDefaultPeerConfig } from '~/server/services/wg-conf-parser'
+import type { WGDGlobalDefaults, WGDInterfaceInfo } from '~/types'
 
 // Returns read-only base data (peers/center/online status from WGDashboard + wg CLI)
 // plus the raw persisted config. The frontend derives the whole graph from a
 // draft clone of `config`, so this endpoint does NOT compute nodes/edges anymore.
+//
+// Peers are exposed as structured JSON (DefaultPeerConfig) — the DEFAULT config
+// layer — parsed once from their `.conf` text. Global defaults + CENTER
+// interface info come from real JSON endpoints. Frontend never sees .conf text.
 export default defineEventHandler(async () => {
   const runtimeConfig = useRuntimeConfig()
   const config = await configService.getAll()
 
-  let wgPeers: Awaited<ReturnType<typeof fetchAllPeers>> = []
-  try {
-    wgPeers = await fetchAllPeers()
-  } catch { /* WGDashboard unavailable */ }
+  // Fetch WGDashboard data sources in parallel.
+  const [wgPeersResult, onlineResult, globalDefaultsResult, interfaceResult, rawResult] = await Promise.all([
+    fetchAllPeers().catch(() => [] as Awaited<ReturnType<typeof fetchAllPeers>>),
+    getShowEndpoints(runtimeConfig.wireguardConfigName).catch(() => ({} as Record<string, string>)),
+    fetchGlobalDefaults().catch(() => ({} as WGDGlobalDefaults)),
+    fetchInterfaceInfo().catch(() => null),
+    fetchRawConfig().catch(() => ''),
+  ])
 
-  let onlineEndpoints: Record<string, string> = {}
-  try {
-    onlineEndpoints = await getShowEndpoints(runtimeConfig.wireguardConfigName)
-  } catch { /* wg not available */ }
+  const wgPeers = wgPeersResult
+  const onlineEndpoints = onlineResult
+  const globalDefaults = globalDefaultsResult
+  const interfaceInfo: WGDInterfaceInfo | null = interfaceResult
 
-  // CENTER node's public key from server-side WG interface config
-  let centerPubKey = ''
-  try {
-    const rawConfig = await fetchRawConfig()
-    const privKeyMatch = rawConfig.match(/PrivateKey\s*=\s*(.+)/)
+  // CENTER node's public key: prefer the structured PublicKey from interface info;
+  // fall back to deriving from the raw config's PrivateKey.
+  let centerPubKey = interfaceInfo?.PublicKey || ''
+  if (!centerPubKey && rawResult) {
+    const privKeyMatch = rawResult.match(/PrivateKey\s*=\s*(.+)/)
     if (privKeyMatch) {
       const derived = await derivePubKey(privKeyMatch[1].trim())
       if (derived) centerPubKey = derived
     }
-  } catch { /* can't determine center */ }
+  }
 
-  // Read-only peer base info (identity is the derived public key)
-  const basePeers: Array<{ publicKey: string; fileName: string; address: string; isOnline: boolean }> = []
+  // Read-only peer base info. Identity is the derived public key (from the
+  // peer's own PrivateKey). The `default` field is the full DEFAULT config layer
+  // (parsed .conf + global defaults).
+  const basePeers = []
   for (const peer of wgPeers) {
-    const priKeyMatch = peer.file?.match(/PrivateKey = (.+)/)
-    const addressMatch = peer.file?.match(/Address = (.+)/)
-    let pubKey = ''
-    if (priKeyMatch) {
-      const derived = await derivePubKey(priKeyMatch[1].trim())
-      if (derived) pubKey = derived
-    }
+    const parsed = parsePeerConf(peer.file || '')
+    if (!parsed.privateKey) continue
+    const pubKey = await derivePubKey(parsed.privateKey)
     if (!pubKey) continue
+
+    const defaultCfg = buildDefaultPeerConfig(
+      parsed,
+      globalDefaults,
+      pubKey in onlineEndpoints,
+      peer.fileName,
+      pubKey,
+    )
     basePeers.push({
       publicKey: pubKey,
       fileName: peer.fileName,
-      address: addressMatch?.[1]?.trim() || '',
       isOnline: pubKey in onlineEndpoints,
+      default: defaultCfg,
     })
   }
 
@@ -53,6 +69,8 @@ export default defineEventHandler(async () => {
     basePeers,
     centerPubKey,
     onlineEndpoints,
+    interfaceInfo,
+    globalDefaults,
     config,
   }
 })

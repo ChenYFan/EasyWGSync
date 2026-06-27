@@ -7,8 +7,8 @@
   >
     <!-- Header: what was selected -->
     <div class="px-3 py-2 border-b border-border">
-      <p class="text-[10px] uppercase tracking-wider text-muted-foreground">
-        你选中了一个{{ typeLabel }}
+      <p class="field-label">
+        {{ typeLabel }}
       </p>
       <p class="text-sm font-medium text-foreground truncate mt-0.5">{{ headerName }}</p>
       <p v-if="headerSub" class="text-[11px] text-muted-foreground truncate">{{ headerSub }}</p>
@@ -16,25 +16,26 @@
 
     <!-- Node menu -->
     <template v-if="type === 'node'">
-      <div class="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">Group</div>
+      <div class="px-3 py-1.5 field-label">Group</div>
       <button class="menu-item" @click="emit('add-to-group')">Add to Group…</button>
       <button class="menu-item" @click="emit('remove-from-group')">Remove from Group…</button>
       <div class="my-1 border-t border-border" />
-      <div class="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">Network</div>
+      <div class="px-3 py-1.5 field-label">Network</div>
       <button class="menu-item" @click="emit('traceroute')">Mock TraceRoute</button>
       <button class="menu-item" @click="emit('relay-for')">Relay for…</button>
+      <button class="menu-item" @click="emit('proxy-for')">Proxy for…</button>
     </template>
 
     <!-- Group menu -->
     <template v-if="type === 'group'">
-      <div class="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">Action</div>
+      <div class="px-3 py-1.5 field-label">Action</div>
       <button class="menu-item" @click="emit('add-peer')">Add Peer to ({{ headerName }})</button>
       <button class="menu-item text-destructive" @click="emit('delete-group')">Delete Group ({{ headerName }})</button>
     </template>
 
     <!-- Connection menu -->
     <template v-if="type === 'connection'">
-      <div class="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">Network</div>
+      <div class="px-3 py-1.5 field-label">Network</div>
       <button class="menu-item" @click="emit('set-gateway')">Set ({{ connTarget }}) As Gateway for ({{ connSource }})</button>
       <button class="menu-item text-destructive" @click="emit('set-default')">Set As Default</button>
     </template>
@@ -58,6 +59,7 @@ const emit = defineEmits<{
   'add-to-group': []
   'remove-from-group': []
   'relay-for': []
+  'proxy-for': []
   'traceroute': []
   'add-peer': []
   'delete-group': []

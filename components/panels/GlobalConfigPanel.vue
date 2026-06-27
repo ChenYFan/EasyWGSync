@@ -1,23 +1,17 @@
 <template>
-  <div class="fixed inset-y-0 right-0 w-[420px] bg-card border-l border-border shadow-xl z-50 flex flex-col">
-    <div class="h-14 flex items-center justify-between px-4 border-b border-border shrink-0">
-      <h3 class="text-sm font-medium text-foreground">Global Settings</h3>
-      <button @click="$emit('close')" class="text-muted-foreground hover:text-foreground text-lg">&times;</button>
-    </div>
-
-    <div class="flex-1 overflow-y-auto p-4 space-y-4">
+  <SidePanel title="Global Settings" @close="$emit('close')">
       <div>
-        <label class="text-[10px] uppercase tracking-wider text-muted-foreground">Listen Port</label>
+        <label class="field-label">Listen Port</label>
         <input
           v-model.number="form.GLOBAL_LISTEN_PORT"
           type="number"
-          class="mt-1 w-full h-9 px-3 rounded-md border border-input bg-background text-sm text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+          class="mt-1 w-full field-input font-mono"
           placeholder="e.g. 51820"
         />
       </div>
 
       <div>
-        <label class="text-[10px] uppercase tracking-wider text-muted-foreground">DNS Enabled</label>
+        <label class="field-label">DNS Enabled</label>
         <div class="mt-1 flex items-center gap-2">
           <input type="checkbox" v-model="form.GLOBAL_DNS" class="rounded border-input accent-foreground" />
           <span class="text-sm text-foreground">{{ form.GLOBAL_DNS ? 'Yes' : 'No' }}</span>
@@ -25,7 +19,7 @@
       </div>
 
       <div>
-        <label class="text-[10px] uppercase tracking-wider text-muted-foreground">Scripts</label>
+        <label class="field-label">Scripts</label>
         <div class="mt-1 space-y-2">
           <div v-for="type in ['PreUp', 'PostUp', 'PreDown', 'PostDown']" :key="type">
             <label class="text-[10px] text-muted-foreground">{{ type }}</label>
@@ -35,24 +29,23 @@
               :ref="el => textareaRefs[type] = (el as HTMLTextAreaElement | null)"
               rows="1"
               @input="autoGrow($event)"
-              class="w-full px-2 py-1.5 rounded border border-input bg-background text-xs text-foreground font-mono resize-none focus:outline-none focus:ring-1 focus:ring-ring overflow-hidden"
+              class="w-full field-textarea overflow-hidden"
             />
           </div>
         </div>
       </div>
-    </div>
 
-    <div class="h-14 flex items-center justify-end gap-2 px-4 border-t border-border shrink-0">
-      <button
-        @click="$emit('close')"
-        class="h-8 px-3 rounded-md text-sm text-muted-foreground hover:text-foreground"
-      >Cancel</button>
-      <button
-        @click="handleSave"
-        class="h-8 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90"
-      >Save</button>
-    </div>
-  </div>
+      <template #footer>
+        <button
+          @click="$emit('close')"
+          class="btn-ghost"
+        >Cancel</button>
+        <button
+          @click="handleSave"
+          class="btn-primary"
+        >Save</button>
+      </template>
+  </SidePanel>
 </template>
 
 <script setup lang="ts">

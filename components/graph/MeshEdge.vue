@@ -3,7 +3,7 @@
     <span class="text-xs font-mono text-muted-foreground">
       {{ edgeData?.primaryGroup || '' }}
     </span>
-    <span v-if="edgeData?.hasP2PConfig" class="text-[10px] text-blue-400">P2P</span>
+    <span v-if="edgeData?.hasP2PConfig" class="text-[10px] text-info">P2P</span>
   </div>
 </template>
 

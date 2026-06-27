@@ -1,14 +1,7 @@
 <template>
-  <div class="fixed inset-y-0 right-0 w-[420px] bg-card border-l border-border shadow-xl z-50 flex flex-col">
-    <div class="h-14 flex items-center justify-between px-4 border-b border-border shrink-0">
-      <h3 class="text-sm font-medium text-foreground">Mock TraceRoute</h3>
-      <button @click="$emit('close')" class="text-muted-foreground hover:text-foreground text-lg">&times;</button>
-    </div>
-
-    <div class="flex-1 overflow-y-auto p-4 space-y-4">
-      <!-- Source node -->
+  <SidePanel title="Mock TraceRoute" @close="$emit('close')">
       <div>
-        <label class="text-[10px] uppercase tracking-wider text-muted-foreground">Source</label>
+        <label class="field-label">Source</label>
         <MiniCard
           class="mt-1.5"
           type="node"
@@ -19,14 +12,13 @@
         />
       </div>
 
-      <!-- Target IP input -->
       <div>
-        <label class="text-[10px] uppercase tracking-wider text-muted-foreground">Target IP</label>
+        <label class="field-label">Target IP</label>
         <div class="flex gap-2 mt-1">
           <input
             v-model="targetIp"
-            class="flex-1 h-9 px-3 rounded-md border border-input bg-background text-sm text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-ring"
-            placeholder="e.g. 192.168.222.1"
+            class="flex-1 field-input font-mono"
+            placeholder="e.g. 127.0.0.1"
             @keydown.enter="runTrace"
           />
           <button
@@ -37,23 +29,18 @@
         </div>
       </div>
 
-      <!-- Results -->
       <div v-if="result">
-        <!-- Conclusion summary at top -->
-        <div
-          class="px-3 py-2 rounded-md border"
-          :class="conclusionClass"
-        >
+        <StatusBox :level="conclusionLevel">
           <p class="text-xs" :class="conclusionTextClass">
             <span class="font-medium">结论：</span>
-            去程 {{ result.forward.error ? '不通' : '可达' }}（{{ result.forward.hops.length }} 跳）·
+            去程 {{ result.forward.error ? '不通' : '可达' }} ·
             回程 {{ returnStatus }}
           </p>
-        </div>
+        </StatusBox>
 
         <!-- Forward: source -> target IP -->
         <div>
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground">
+          <label class="field-label">
             去程 ({{ result.forward.hops.length }} 跳)
           </label>
           <div class="mt-2 space-y-0">
@@ -71,14 +58,14 @@
               <div v-if="i < result.forward.hops.length - 1" class="text-center text-lg text-muted-foreground py-1">↓</div>
             </template>
           </div>
-          <div v-if="result.forward.error" class="mt-2 px-3 py-2 rounded-md bg-destructive/10 border border-destructive/30">
-            <p class="text-xs text-destructive">✗ {{ result.forward.error }}</p>
-          </div>
+          <StatusBox v-if="result.forward.error" level="error" class="mt-2">
+            <p class="text-xs text-error">✗ {{ result.forward.error }}</p>
+          </StatusBox>
         </div>
 
         <!-- Return: trace source IP FROM the destination node (always run, independent of forward) -->
         <div v-if="result.returnTrace" class="pt-4 border-t border-border">
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground">
+          <label class="field-label">
             回程 ({{ result.returnTrace.hops.length }} 跳)
           </label>
           <div v-if="result.returnTrace" class="mt-2 space-y-0">
@@ -96,20 +83,19 @@
               <div v-if="i < result.returnTrace!.hops.length - 1" class="text-center text-lg text-muted-foreground py-1">↓</div>
             </template>
           </div>
-          <div v-if="result.returnTrace?.error" class="mt-2 px-3 py-2 rounded-md bg-destructive/10 border border-destructive/30">
-            <p class="text-xs text-destructive">✗ {{ result.returnTrace.error }}</p>
-          </div>
+          <StatusBox v-if="result.returnTrace?.error" level="error" class="mt-2">
+            <p class="text-xs text-error">✗ {{ result.returnTrace.error }}</p>
+          </StatusBox>
         </div>
       </div>
-    </div>
-  </div>
+  </SidePanel>
 </template>
 
 <script setup lang="ts">
 import { EasyWGSyncModel } from '~/composables/useEasyWGSync'
-import { parseWireGuardConfig, ipv4InCIDR, getCIDRPrefix, type ParsedWireGuardConfig } from '~/composables/useWgConfigParser'
+import { tracePath, centerRoutingConfig, extractIP, extractCenterOwnIPs, buildPubkeyToId, type ParsedWireGuardConfig } from '~/composables/useWgConfigParser'
+import { fetchParsedConfig } from '~/composables/useHealthFull'
 import { useDraft } from '~/composables/useDraft'
-import { authFetch } from '~/composables/useAuth'
 
 const props = defineProps<{
   sourceId: string
@@ -135,99 +121,44 @@ const result = ref<{
 // Fetch a node's generated WireGuard config (from draft) and parse it.
 async function fetchNodeConfig(nodeId: string): Promise<ParsedWireGuardConfig | null> {
   const node = props.graphData?.nodes?.find((n: any) => n.id === nodeId)
+  // CENTER has no peer .conf to generate — use its real routing table (a [Peer]
+  // per node /32; ownIPs read off the CENTER node) so a trace through OR to the
+  // hub resolves instead of dead-ending.
+  if (node?.data?.isCenter) return centerRoutingConfig(props.graphData?.nodes || [])
   const peerName = node?.data?.fileName
   if (!peerName) return null
-  try {
-    const res = await authFetch('/api/admin/mock-config', {
-      method: 'POST',
-      body: { config: draftStore.draft.value, peerName },
-    }) as any
-    return parseWireGuardConfig(res.config)
-  } catch {
-    return null
-  }
+  return fetchParsedConfig(peerName, draftStore.draft.value)
 }
 
-// Find node by IP (from graphData addresses)
+// Find node by IP (from graphData addresses; CENTER via its stamped ownIPs,
+// since its display address is the 'ALL' sentinel).
 function findNodeByIp(ip: string): string | null {
   const bare = ip.replace(/\/\d+$/, '')
   for (const n of props.graphData?.nodes || []) {
-    const addr = n.data?.address || ''
-    for (const a of addr.split(',').map((s: string) => s.trim())) {
-      if (a.includes('.') && a.replace(/\/\d+$/, '') === bare) return n.id
+    const addrs = [n.data?.address || '', ...(n.data?.ownIPs || [])].join(',')
+    for (const a of addrs.split(',').map((s: string) => s.trim())) {
+      if (a.replace(/\/\d+$/, '') === bare) return n.id
     }
   }
   return null
 }
 
-// Trace using real generated configs: at each hop, fetch the node's .conf,
-// look up which peer's AllowedIPs covers the target IP (longest prefix), go there.
-async function traceWithRealConfig(
-  sourceId: string,
-  targetIp: string,
-  maxHops = 16
-): Promise<{ hops: any[]; error?: string }> {
-  const hops: any[] = []
-  const visited = new Set<string>()
-  let currentId = sourceId
-  const nodeName = (id: string) => props.graphData?.nodes?.find((n: any) => n.id === id)?.data?.fileName || id.slice(0, 12)
+// tracePath drives the hop-by-hop logic (routeStep + CENTER-NAT source rewrite
+// + cryptokey source-acceptance) and is shared with health. TraceRoutePanel
+// feeds it a per-node async getter (fetchNodeConfig — fetches on demand) and
+// decorates the returned hops for display. pubkeyToId + CENTER own-IP
+// extraction reuse the shared helpers from useWgConfigParser.
 
-  hops.push({ nodeId: currentId, nodeName: nodeName(currentId), matchedCIDR: null, isSource: true, isDestination: false })
-
-  for (let i = 0; i < maxHops; i++) {
-    const conf = await fetchNodeConfig(currentId)
-    if (!conf) {
-      return { hops, error: `无法生成 ${nodeName(currentId)} 的配置` }
-    }
-
-    // Check if current node owns the target IP
-    for (const ip of conf.ownIPs) {
-      if (ip.includes('.') && ipv4InCIDR(targetIp, ip)) {
-        hops[hops.length - 1].isDestination = true
-        return { hops }
-      }
-    }
-
-    if (visited.has(currentId)) {
-      return { hops, error: `路由环路：${nodeName(currentId)} 被重复访问` }
-    }
-    visited.add(currentId)
-
-    // Find best route: longest prefix match across all peers' AllowedIPs
-    let bestPeer: { pubkey: string; cidr: string; prefix: number } | null = null
-    for (const [pubkey, peer] of conf.peers) {
-      for (const cidr of peer.allowedIPs) {
-        if (!cidr.includes('.')) continue
-        if (ipv4InCIDR(targetIp, cidr)) {
-          const prefix = getCIDRPrefix(cidr)
-          if (!bestPeer || prefix > bestPeer.prefix) {
-            bestPeer = { pubkey, cidr, prefix }
-          }
-        }
-      }
-    }
-
-    if (!bestPeer) {
-      return { hops, error: `路由不可达：${nodeName(currentId)} 没有覆盖 ${targetIp} 的路由` }
-    }
-
-    // Map pubkey back to node id
-    const nextNode = props.graphData?.nodes?.find((n: any) => n.data?.publicKey === bestPeer!.pubkey)
-    if (!nextNode) {
-      return { hops, error: `找不到 pubkey ${bestPeer.pubkey.slice(0, 8)} 对应的节点` }
-    }
-
-    currentId = nextNode.id
-    hops.push({
-      nodeId: currentId,
-      nodeName: nodeName(currentId),
-      matchedCIDR: bestPeer.cidr,
-      isSource: false,
-      isDestination: false,
-    })
-  }
-
-  return { hops, error: `超过最大跳数 (${maxHops})` }
+// Decorate tracePath's plain hops { nodeId, cidr } into the display shape the
+// template expects (nodeName, matchedCIDR, isSource, isDestination).
+function decorateHops(hops: { nodeId: string; cidr: string | null }[]): any[] {
+  return hops.map((h, i) => ({
+    nodeId: h.nodeId,
+    nodeName: model.value.getNodeName(h.nodeId),
+    matchedCIDR: h.cidr,
+    isSource: i === 0,
+    isDestination: i === hops.length - 1,
+  }))
 }
 
 async function runTrace() {
@@ -236,29 +167,45 @@ async function runTrace() {
   const ip = targetIp.value.trim()
 
   try {
-    // 去程: source -> target IP
-    const forward = await traceWithRealConfig(props.sourceId, ip)
+    const isV6 = ip.includes(':')
+    const family = isV6 ? 'v6' : 'v4'
+    const srcNode = props.graphData?.nodes?.find((n: any) => n.id === props.sourceId)
+    const srcIp = extractIP(srcNode?.data?.address || '', family)
+    const destId = findNodeByIp(ip)
+    const destNode = destId ? props.graphData?.nodes?.find((n: any) => n.id === destId) : null
+    const destIp = extractIP(destNode?.data?.address || '', family)
 
-    // 回程: 在目标节点上，对源节点 IP 做 trace
+    // tracePath is async + takes a per-node config getter; fetchNodeConfig
+    // fetches each hop's .conf on demand (CENTER via its synthetic table).
+    const pubkeyToId = buildPubkeyToId(props.graphData?.nodes || [])
+    const centerNode = props.graphData?.nodes?.find((n: any) => n.data?.isCenter)
+    const centerId = centerNode?.id
+    const centerOwn = extractCenterOwnIPs(centerNode?.data?.ownIPs)
+    const centerOwnV4 = centerOwn.v4 || undefined
+    const centerOwnV6 = centerOwn.v6 || undefined
+
+    // 去程: source -> target IP (source IP = srcIp, same family)
+    const fwd = await tracePath({ sourceId: props.sourceId, targetIp: ip, getConfig: fetchNodeConfig, pubkeyToId, centerId, centerOwnIpV4: centerOwnV4, centerOwnIpV6: centerOwnV6, sourceIp: srcIp || '' })
+    const forward = { hops: decorateHops(fwd.hops), error: fwd.ok ? undefined : fwd.reason }
+
+    // 回程: dest -> src IP (source IP = destIp, same family)
     let returnTrace: { hops: any[]; error?: string } | null = null
     let symmetric = false
 
-    const srcNode = props.graphData?.nodes?.find((n: any) => n.id === props.sourceId)
-    const srcAddr = srcNode?.data?.address || ''
-    const srcIpv4 = srcAddr.split(',').map((s: string) => s.trim()).find((s: string) => s.includes('.'))?.replace(/\/\d+$/, '')
-    const destId = findNodeByIp(ip)
-
-    if (srcIpv4 && destId) {
-      returnTrace = await traceWithRealConfig(destId, srcIpv4)
+    if (srcIp && destId && destIp) {
+      const ret = await tracePath({ sourceId: destId, targetIp: srcIp, getConfig: fetchNodeConfig, pubkeyToId, centerId, centerOwnIpV4: centerOwnV4, centerOwnIpV6: centerOwnV6, sourceIp: destIp })
+      returnTrace = { hops: decorateHops(ret.hops), error: ret.ok ? undefined : ret.reason }
       if (!returnTrace.error && !forward.error) {
-        const fwdIds = forward.hops.map(h => h.nodeId).reverse()
-        const retIds = returnTrace.hops.map(h => h.nodeId)
+        const fwdIds = forward.hops.map((h: any) => h.nodeId).reverse()
+        const retIds = returnTrace.hops.map((h: any) => h.nodeId)
         symmetric = JSON.stringify(fwdIds) === JSON.stringify(retIds)
       }
-    } else if (!srcIpv4) {
-      returnTrace = { hops: [], error: '无法验证回程：源节点无 IPv4 地址' }
+    } else if (!srcIp) {
+      returnTrace = { hops: [], error: `无法验证回程：源节点无 ${isV6 ? 'IPv6' : 'IPv4'} 地址` }
     } else if (!destId) {
       returnTrace = { hops: [], error: '无法验证回程：找不到拥有该目标 IP 的节点' }
+    } else if (!destIp) {
+      returnTrace = { hops: [], error: `无法验证回程：目标节点无 ${isV6 ? 'IPv6' : 'IPv4'} 地址` }
     }
 
     result.value = { forward, returnTrace, symmetric }
@@ -270,7 +217,6 @@ async function runTrace() {
   }
 }
 
-// Conclusion summary
 const returnStatus = computed(() => {
   if (!result.value?.returnTrace) return '未测'
   if (result.value.returnTrace.error) return '不通'
@@ -282,21 +228,17 @@ const bothOk = computed(() =>
   result.value && !result.value.forward.error &&
   result.value.returnTrace && !result.value.returnTrace.error
 )
-const conclusionClass = computed(() => {
-  if (!result.value) return ''
+const conclusionLevel = computed<'success' | 'warning' | 'error'>(() => {
+  if (!result.value) return 'error'
   const fwdOk = !result.value.forward.error
   const retOk = result.value.returnTrace && !result.value.returnTrace.error
-  if (fwdOk && retOk && result.value.symmetric) {
-    return 'bg-emerald-500/10 border-emerald-500/30'
-  }
-  if (fwdOk && retOk && !result.value.symmetric) {
-    return 'bg-yellow-500/10 border-yellow-500/30'
-  }
-  return 'bg-destructive/10 border-destructive/30'
+  if (fwdOk && retOk && result.value.symmetric) return 'success'
+  if (fwdOk && retOk && !result.value.symmetric) return 'warning'
+  return 'error'
 })
 const conclusionTextClass = computed(() => {
-  if (!bothOk.value) return 'text-destructive'
-  if (result.value?.symmetric) return 'text-emerald-400'
-  return 'text-yellow-400'
+  if (!bothOk.value) return 'text-error'
+  if (result.value?.symmetric) return 'text-success'
+  return 'text-warning'
 })
 </script>

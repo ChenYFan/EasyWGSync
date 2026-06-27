@@ -37,6 +37,7 @@ export default defineNuxtConfig({
     head: {
       title: 'EasyWGSync',
       meta: [
+        { name: 'viewport', content: 'width=device-width, initial-scale=1, viewport-fit=cover' },
         { name: 'format-detection', content: 'telephone=no,address=no,email=no' },
       ],
       link: [

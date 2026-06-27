@@ -4,8 +4,8 @@
     :class="{
       'selected': data.selected,
       'border-border': !data.selected && !data.isCenter,
-      'border-foreground': data.selected,
-      'border-foreground/60 ring-1 ring-foreground/20': data.isCenter && !data.selected,
+      'border-foreground': data.selected && !data.isCenter,
+      'is-center': data.isCenter,
     }"
   >
     <!-- Multiple handles distributed along edges for natural closest-point connection -->
@@ -19,7 +19,7 @@
     <div class="flex items-center gap-2 mb-2">
       <span
         class="w-2 h-2 rounded-full shrink-0"
-        :class="data.isOnline ? 'bg-emerald-500' : 'bg-neutral-600'"
+        :class="data.isOnline ? 'bg-success' : 'bg-neutral-600'"
       />
       <span class="text-sm font-semibold text-card-foreground whitespace-nowrap">
         {{ data.displayName }}
@@ -31,13 +31,17 @@
         <td class="text-muted-foreground pr-2 whitespace-nowrap align-top">公钥</td>
         <td class="text-foreground/80 whitespace-nowrap">{{ data.publicKey }}</td>
       </tr>
-      <tr v-if="ipv4">
-        <td class="text-muted-foreground pr-2 whitespace-nowrap">IPv4</td>
-        <td class="text-foreground/80 whitespace-nowrap">{{ ipv4 }}</td>
+      <tr v-if="ipv4.length">
+        <td class="text-muted-foreground pr-2 whitespace-nowrap align-top">IPv4</td>
+        <td class="text-foreground/80 whitespace-nowrap">
+          <div v-for="(ip, i) in ipv4" :key="i">{{ ip }}</div>
+        </td>
       </tr>
-      <tr v-if="ipv6">
-        <td class="text-muted-foreground pr-2 whitespace-nowrap">IPv6</td>
-        <td class="text-foreground/80 whitespace-nowrap">{{ ipv6 }}</td>
+      <tr v-if="ipv6.length">
+        <td class="text-muted-foreground pr-2 whitespace-nowrap align-top">IPv6</td>
+        <td class="text-foreground/80 whitespace-nowrap">
+          <div v-for="(ip, i) in ipv6" :key="i">{{ ip }}</div>
+        </td>
       </tr>
       <tr v-if="data.endpoint && data.endpoint !== 'none'">
         <td class="text-muted-foreground pr-2 whitespace-nowrap">端点</td>
@@ -56,20 +60,16 @@
       </span>
     </div>
     <div v-if="data.relays?.length || data.proxies?.length" class="flex gap-1.5 mt-1.5 flex-wrap">
-      <span
+      <StatusChip
         v-for="relayed in data.relays"
         :key="'r-' + relayed.id"
-        class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full border border-purple-500/40 bg-purple-500/10 text-purple-400"
-      >
-        <span>Relay: [{{ relayed.name }}]</span>
-      </span>
-      <span
+        level="important"
+      >Relay · {{ relayed.name }}</StatusChip>
+      <StatusChip
         v-for="proxied in data.proxies"
         :key="'p-' + proxied.id"
-        class="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full border border-sky-500/40 bg-sky-500/10 text-sky-400"
-      >
-        <span>Proxy: [{{ proxied.name }}]</span>
-      </span>
+        level="info"
+      >Proxy · {{ proxied.name }}</StatusChip>
     </div>
   </div>
 </template>
@@ -77,6 +77,7 @@
 <script setup lang="ts">
 import { Handle, Position } from '@vue-flow/core'
 import { getGroupColor } from '~/composables/useMeshGraph'
+import { classifyIP } from '~/composables/useWgConfigParser'
 
 const props = defineProps<{
   data: {
@@ -130,21 +131,20 @@ const handles = computed(() => {
 })
 
 const ipv4 = computed(() => {
-  if (!props.data.address) return null
-  const parts = props.data.address.split(',').map(s => s.trim())
-  return parts.find(p => p.includes('.')) || null
+  if (!props.data.address) return [] as string[]
+  return props.data.address.split(',').map(s => s.trim()).filter(p => classifyIP(p) === 'v4')
 })
 
 const ipv6 = computed(() => {
-  if (!props.data.address) return null
-  const parts = props.data.address.split(',').map(s => s.trim())
-  return parts.find(p => p.includes(':')) || null
+  if (!props.data.address) return [] as string[]
+  return props.data.address.split(',').map(s => s.trim()).filter(p => classifyIP(p) === 'v6')
 })
 </script>
 
 <style scoped>
 .peer-node {
   cursor: pointer;
+  position: relative;
   transition: border-color 0.15s, box-shadow 0.15s, opacity 0.3s;
   width: max-content;
 }
@@ -155,5 +155,38 @@ const ipv6 = computed(() => {
 .peer-node.selected {
   border-color: hsl(var(--foreground)) !important;
   box-shadow: 0 0 12px 2px hsl(var(--foreground) / 0.3), 0 0 4px 1px hsl(var(--foreground) / 0.5);
+}
+
+/* CENTER node: animated multi-colour gradient ring (the card's own border is
+   made transparent; the ring is drawn by a masked ::before so only the 2px
+   frame shows, never covering content). */
+@property --cf-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+@keyframes cf-spin {
+  to { --cf-angle: 360deg; }
+}
+.peer-node.is-center {
+  border-color: transparent !important;
+}
+.peer-node.is-center::before {
+  content: '';
+  position: absolute;
+  inset: -1.5px;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(from var(--cf-angle),
+    #ff2d55, #ff9500, #ffcc00, #34c759, #00c7be, #007aff, #5856d6, #af52de, #ff2d55);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  animation: cf-spin 5s linear infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+.peer-node.is-center.selected {
+  box-shadow: 0 0 14px 2px hsl(271 70% 60% / 0.4), 0 0 6px 1px hsl(199 89% 55% / 0.5);
 }
 </style>

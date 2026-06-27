@@ -1,154 +1,147 @@
 <template>
-  <div class="fixed inset-y-0 right-0 w-[420px] bg-card border-l border-border shadow-xl z-50 flex flex-col">
-    <div class="h-14 flex items-center justify-between px-4 border-b border-border shrink-0">
-      <h3 class="text-sm font-medium text-foreground">高级配置 (Hybrid Mesh)</h3>
-      <button @click="$emit('close')" class="text-muted-foreground hover:text-foreground text-lg">&times;</button>
-    </div>
+  <SidePanel title="Hybrid Mesh" body-class="p-4 space-y-5" @close="$emit('close')">
+      <DeclarationSection
+        label="Relay"
+        description="Public 广播 通过自己可达 Private"
+        :items="relayRows"
+        empty-text="No relay declarations"
+        :highlight="highlight"
+        @add="startAdd('RELAY')"
+        @edit="row => startEdit('RELAY', row)"
+        @remove="(pub, priv) => draftStore.removeRelay(pub, priv)"
+      />
 
-    <div class="flex-1 overflow-y-auto p-4 space-y-5">
-      <!-- RELAY -->
+      <DeclarationSection
+        label="Proxy"
+        description="Public 允许 Private 通过 NAT 访问本网络"
+        :items="proxyRows"
+        empty-text="No proxy declarations"
+        :highlight="highlight"
+        @add="startAdd('PROXY')"
+        @edit="row => startEdit('PROXY', row)"
+        @remove="(pub, priv) => draftStore.removeProxy(pub, priv)"
+      />
+
+      <DeclarationSection
+        label="Gateway"
+        description="将 Public 作为整网出口"
+        :items="gatewayRows"
+        empty-text="No gateway declarations"
+        :highlight="highlight"
+        @add="startAdd('GATEWAY')"
+        @edit="row => startEdit('GATEWAY', row)"
+        @remove="(pub, priv) => draftStore.removeGateway(pub, priv)"
+      />
+
+      <!-- Default CENTER Gateway (implicit virtual gateway, read-only, folded).
+           A peer's implicit CENTER gateway is ENABLED (the virtual gateway stacks
+           the domain network onto X→CENTER) unless the peer explicitly roams via
+           another exit — then the virtual gateway is disabled for it and X→CENTER
+           falls back to CENTER's own host IP (ordinary peer, not a gateway).
+           Domain network prefix (v4 + v6) is derived by TopologyModel.getDomainNetworks(). -->
       <div>
-        <div class="flex items-center justify-between mb-2">
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground">Relay (中继)</label>
-          <button @click="startAdd('RELAY')" class="text-xs text-muted-foreground hover:text-foreground">+ Add</button>
-        </div>
-        <p class="text-[10px] text-muted-foreground mb-2">经由 Public 让 Private 可达，纯路由。</p>
-        <div class="space-y-1.5">
-          <div v-for="(d, i) in relays" :key="'r'+i" class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-background border border-border">
-            <span class="text-xs text-foreground truncate">{{ nodeName(d.PUBLIC_PEER) }}</span>
-            <span class="text-[10px] text-muted-foreground">→</span>
-            <span class="text-xs text-foreground truncate">{{ nodeName(d.PRIVATE_PEER) }}</span>
-            <button @click="draftStore.removeRelay(d.PUBLIC_PEER, d.PRIVATE_PEER)" class="ml-auto text-xs text-destructive hover:text-destructive/80">&times;</button>
+        <details class="group">
+          <summary class="cursor-pointer select-none flex items-center gap-1.5 text-xs font-medium text-foreground">
+            <span class="text-[10px] text-muted-foreground transition-transform duration-150 group-open:rotate-90">▶</span>
+            Default CENTER Gateway<span class="text-muted-foreground/60">({{ centerGatewayEdges.length }})</span>
+          </summary>
+          <p class="text-[10px] text-muted-foreground mt-2 mb-2">默认情况下节点以 CENTER 为 Gateway。<br/>若节点建立了其他 Gateway，则默认 Gateway 将被自动禁用。</p>
+          <div class="space-y-1">
+            <div
+              v-for="e in centerGatewayEdges"
+              :key="'cg'+e.id"
+              class="flex items-center gap-2 px-2 py-1 rounded-md border"
+              :class="e.enabled ? 'bg-muted/30 border-border/50' : 'bg-warning/10 border-warning/50'"
+            >
+              <span class="text-xs text-foreground truncate">{{ e.name }}</span>
+              <span class="text-[10px] text-muted-foreground">→</span>
+              <span class="text-xs text-muted-foreground truncate">CENTER</span>
+              <span v-if="e.enabled" class="ml-auto text-[9px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">Default</span>
+              <span v-else class="ml-auto text-[9px] px-1.5 py-0.5 rounded-full bg-warning/20 text-warning">Disabled</span>
+            </div>
+            <p v-if="!centerGatewayEdges.length" class="text-xs text-muted-foreground">无</p>
           </div>
-          <p v-if="!relays.length" class="text-xs text-muted-foreground">No relay declarations</p>
-        </div>
+        </details>
       </div>
 
-      <!-- PROXY -->
-      <div>
-        <div class="flex items-center justify-between mb-2">
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground">Proxy (NAT 代理)</label>
-          <button @click="startAdd('PROXY')" class="text-xs text-muted-foreground hover:text-foreground">+ Add</button>
-        </div>
-        <p class="text-[10px] text-muted-foreground mb-2">让 Private 经由 Public 以 NAT 方式接入。</p>
-        <div class="space-y-1.5">
-          <div v-for="(d, i) in proxies" :key="'p'+i" class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-background border border-border">
-            <span class="text-xs text-foreground truncate">{{ nodeName(d.PUBLIC_PEER) }}</span>
-            <span class="text-[10px] text-muted-foreground">→</span>
-            <span class="text-xs text-foreground truncate">{{ nodeName(d.PRIVATE_PEER) }}</span>
-            <button @click="draftStore.removeProxy(d.PUBLIC_PEER, d.PRIVATE_PEER)" class="ml-auto text-xs text-destructive hover:text-destructive/80">&times;</button>
-          </div>
-          <p v-if="!proxies.length" class="text-xs text-muted-foreground">No proxy declarations</p>
-        </div>
-      </div>
 
-      <!-- GATEWAY -->
-      <div>
-        <div class="flex items-center justify-between mb-2">
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground">Gateway (网关)</label>
-          <button @click="startAdd('GATEWAY')" class="text-xs text-muted-foreground hover:text-foreground">+ Add</button>
-        </div>
-        <p class="text-[10px] text-muted-foreground mb-2">将 Public 作为整个网络的出口。</p>
-        <div class="space-y-1.5">
-          <div v-for="(d, i) in gateways" :key="'g'+i" class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-background border border-border">
-            <span class="text-xs text-foreground truncate">{{ nodeName(d.PRIVATE_PEER) }}</span>
-            <span class="text-[10px] text-muted-foreground">→</span>
-            <span class="text-xs text-foreground truncate">{{ nodeName(d.PUBLIC_PEER) }}</span>
-            <button @click="draftStore.removeGateway(d.PUBLIC_PEER, d.PRIVATE_PEER)" class="ml-auto text-xs text-destructive hover:text-destructive/80">&times;</button>
-          </div>
-          <p v-if="!gateways.length" class="text-xs text-muted-foreground">No gateway declarations</p>
-        </div>
-      </div>
-
-      <!-- ROAMING -->
       <div class="pt-4 border-t border-border">
-        <div class="flex items-center justify-between mb-2">
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground">Roaming (漫游)</label>
-          <button @click="startAdd('ROAMING')" class="text-xs text-muted-foreground hover:text-foreground">+ Add</button>
-        </div>
-        <p class="text-[10px] text-muted-foreground mb-2">漫游节点经由接入点接入网络。</p>
-        <div class="space-y-1.5">
-          <div v-for="(r, i) in roaming" :key="'roam'+i" class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-background border border-border">
-            <span class="text-xs text-foreground truncate">{{ nodeName(r.PRIVATE_PEER) }}</span>
-            <span class="text-[10px] text-muted-foreground">→</span>
-            <span class="text-xs text-foreground truncate">{{ nodeName(r.PUBLIC_PEER) }}</span>
-            <span class="text-[9px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">{{ r.TYPE }}</span>
-            <button @click="draftStore.removeRoamingEntry(r.PUBLIC_PEER, r.PRIVATE_PEER)" class="ml-auto text-xs text-destructive hover:text-destructive/80">&times;</button>
-          </div>
-          <p v-if="!roaming.length" class="text-xs text-muted-foreground">No roaming entries</p>
-        </div>
+        <DeclarationSection
+          label="Roaming"
+          description="漫游节点经由接入点接入"
+          :items="roamingRows"
+          empty-text="No roaming entries"
+          :highlight="highlight"
+          @add="startAdd('ROAMING')"
+          @edit="row => startEdit('ROAMING', row)"
+          @remove="(pub, priv) => draftStore.removeRoamingEntry(pub, priv)"
+        />
       </div>
-    </div>
 
-    <div class="h-14 flex items-center justify-end px-4 border-t border-border shrink-0">
-      <button @click="$emit('close')" class="h-8 px-3 rounded-md text-sm text-muted-foreground hover:text-foreground">Close</button>
-    </div>
+    <template #footer>
+      <button @click="$emit('close')" class="btn-ghost">Close</button>
+    </template>
 
-    <!-- Add Declaration Modal -->
-    <div v-if="addModal.visible" class="fixed inset-0 z-[100] flex items-center justify-center">
-      <div class="absolute inset-0 bg-background/80" @click="addModal.visible = false" />
-      <div class="relative bg-card border border-border rounded-xl shadow-2xl w-[400px] p-4 space-y-4">
-        <h3 class="text-sm font-medium">Add {{ addModal.kind === 'RELAY' ? 'Relay' : addModal.kind === 'PROXY' ? 'Proxy' : addModal.kind === 'GATEWAY' ? 'Gateway' : 'Roaming Entry' }}</h3>
+    <template #overlay>
+    <ModalShell
+      :visible="addModal.visible"
+      :title="`${addModal.mode === 'edit' ? 'Edit' : 'Add'} ${addModal.kind === 'RELAY' ? 'Relay' : addModal.kind === 'PROXY' ? 'Proxy' : addModal.kind === 'GATEWAY' ? 'Gateway' : 'Roaming Entry'}`"
+      @close="addModal.visible = false"
+    >
+      <div class="p-4 space-y-4">
+
+        <label class="flex items-center justify-between cursor-pointer pt-1">
+          <span class="field-label">Enabled</span>
+          <Switch v-model="addModal.enabled" />
+        </label>
+
 
         <div v-if="addModal.kind === 'RELAY' || addModal.kind === 'PROXY'">
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground">PUBLIC</label>
-          <select v-model="addModal.pub" class="mt-1 w-full h-9 px-2 rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-            <option value="">Select...</option>
-            <option v-for="n in peerOptions" :key="n.id" :value="n.id">{{ n.name }}</option>
-          </select>
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground mt-3 block">PRIVATE</label>
-          <select v-model="addModal.priv" class="mt-1 w-full h-9 px-2 rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-            <option value="">Select...</option>
-            <option v-for="n in peerOptions" :key="n.id" :value="n.id">{{ n.name }}</option>
-          </select>
+          <label class="field-label">PUBLIC</label>
+          <PeerSelect v-model="addModal.pub" :options="peerOptions" />
+          <label class="field-label mt-3 block">PRIVATE</label>
+          <PeerSelect v-model="addModal.priv" :options="peerOptions" />
         </div>
 
         <div v-else-if="addModal.kind === 'GATEWAY'">
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground">PRIVATE</label>
-          <select v-model="addModal.priv" class="mt-1 w-full h-9 px-2 rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-            <option value="">Select...</option>
-            <option v-for="n in peerOptions" :key="n.id" :value="n.id">{{ n.name }}</option>
-          </select>
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground mt-3 block">PUBLIC</label>
-          <select v-model="addModal.pub" class="mt-1 w-full h-9 px-2 rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-            <option value="">Select...</option>
-            <option v-for="n in peerOptions" :key="n.id" :value="n.id">{{ n.name }}</option>
-          </select>
+          <label class="field-label">PRIVATE</label>
+          <PeerSelect v-model="addModal.priv" :options="peerOptions" />
+          <label class="field-label mt-3 block">PUBLIC</label>
+          <PeerSelect v-model="addModal.pub" :options="peerOptions" />
         </div>
 
         <div v-else-if="addModal.kind === 'ROAMING'">
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground">PRIVATE</label>
-          <select v-model="addModal.priv" class="mt-1 w-full h-9 px-2 rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-            <option value="">Select...</option>
-            <option v-for="n in peerOptions" :key="n.id" :value="n.id">{{ n.name }}</option>
-          </select>
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground mt-3 block">PUBLIC</label>
-          <select v-model="addModal.pub" class="mt-1 w-full h-9 px-2 rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-            <option value="">Select...</option>
-            <option v-for="n in peerOptions" :key="n.id" :value="n.id">{{ n.name }}</option>
-          </select>
-          <label class="text-[10px] uppercase tracking-wider text-muted-foreground mt-3 block">Mode</label>
-          <select v-model="addModal.roamType" class="mt-1 w-full h-9 px-2 rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-            <option value="flatten">Flatten (Relay+Gateway, 无 NAT)</option>
-            <option value="nat">NAT (Proxy+Gateway, MASQUERADE)</option>
+          <label class="field-label">PRIVATE</label>
+          <PeerSelect v-model="addModal.priv" :options="peerOptions" />
+          <label class="field-label mt-3 block">PUBLIC</label>
+          <PeerSelect v-model="addModal.pub" :options="peerOptions" />
+          <label class="field-label mt-3 block">Mode</label>
+          <select v-model="addModal.roamType" class="field-input w-full mt-1">
+            <option value="flatten">Flatten</option>
+            <option value="nat">NAT</option>
           </select>
         </div>
 
         <div v-if="addError" class="text-xs text-destructive pt-1">{{ addError }}</div>
-        <div class="flex justify-end gap-2 pt-2">
-          <button @click="addModal.visible = false" class="h-8 px-3 rounded-md text-sm text-muted-foreground hover:text-foreground">Cancel</button>
-          <button @click="confirmAdd" :disabled="!canAdd()" class="h-8 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-40">Add</button>
-        </div>
       </div>
-    </div>
-  </div>
+
+      <template #footer>
+        <button @click="addModal.visible = false" class="btn-ghost">Cancel</button>
+        <button @click="confirmAdd" :disabled="!canAdd()" class="btn-primary disabled:opacity-40">{{ addModal.mode === 'edit' ? 'Save' : 'Add' }}</button>
+      </template>
+    </ModalShell>
+    </template>
+  </SidePanel>
 </template>
 
 <script setup lang="ts">
 import { useDraft } from '~/composables/useDraft'
+import { TopologyModel } from '~/composables/useTopology'
+import { EasyWGSyncModel } from '~/composables/useEasyWGSync'
 
 const props = defineProps<{
   graphData: any
+  highlight?: { pub: string; priv: string } | null
 }>()
 
 const emit = defineEmits<{
@@ -156,6 +149,9 @@ const emit = defineEmits<{
 }>()
 
 const draftStore = useDraft()
+const { draft, base } = useDraft()
+const model = computed(() => new EasyWGSyncModel(props.graphData))
+const nodeName = (id: string) => model.value.getNodeName(id)
 
 const hm = computed(() => draftStore.draft.value.HYBRID_MESH)
 const relays = computed(() => hm.value?.DECLARATIONS?.RELAY || [])
@@ -163,35 +159,67 @@ const proxies = computed(() => hm.value?.DECLARATIONS?.PROXY || [])
 const gateways = computed(() => hm.value?.DECLARATIONS?.GATEWAY || [])
 const roaming = computed(() => hm.value?.ROAMING || [])
 
+// Rows for DeclarationSection. RELAY/PROXY display PUBLIC→PRIVATE; GATEWAY/ROAMING
+// display PRIVATE→PUBLIC. pub/priv always carry the real PUBLIC/PRIVATE for
+// highlight + remove (direction-agnostic).
+const relayRows = computed(() => relays.value.map(d => ({ pub: d.PUBLIC_PEER, priv: d.PRIVATE_PEER, left: nodeName(d.PUBLIC_PEER), right: nodeName(d.PRIVATE_PEER), enabled: d.ENABLED !== false })))
+const proxyRows = computed(() => proxies.value.map(d => ({ pub: d.PUBLIC_PEER, priv: d.PRIVATE_PEER, left: nodeName(d.PUBLIC_PEER), right: nodeName(d.PRIVATE_PEER), enabled: d.ENABLED !== false })))
+const gatewayRows = computed(() => gateways.value.map(d => ({ pub: d.PUBLIC_PEER, priv: d.PRIVATE_PEER, left: nodeName(d.PRIVATE_PEER), right: nodeName(d.PUBLIC_PEER), enabled: d.ENABLED !== false })))
+const roamingRows = computed(() => roaming.value.map(r => ({ pub: r.PUBLIC_PEER, priv: r.PRIVATE_PEER, left: nodeName(r.PRIVATE_PEER), right: nodeName(r.PUBLIC_PEER), type: r.TYPE, enabled: r.ENABLED !== false })))
+
+// CENTER default (virtual) Gateway edges, split by state. A peer's implicit
+// CENTER Gateway is ENABLED (stacks the domain network onto X→CENTER) when it
+// hasn't specified another exit (not PRIVATE of any enabled gateway/roaming);
+// DISABLED when it has — X→CENTER falls back to CENTER's own host IP (ordinary
+// peer). Domain prefix (v4+v6) is derived, not hardcoded.
+const centerGatewayEdges = computed(() => {
+  const topo = new TopologyModel(base.value, draft.value)
+  const gatewayPrivates = topo.getExplicitGatewayPrivates()
+  return (props.graphData?.nodes || [])
+    .filter((n: any) => !n.data?.isCenter)
+    .map((n: any) => ({ id: n.id, name: nodeName(n.id), enabled: !gatewayPrivates.has(n.id) }))
+})
+
 const peerOptions = computed(() => {
   return props.graphData?.nodes
     ?.filter((n: any) => !n.data?.isCenter)
-    .map((n: any) => ({ id: n.id, name: n.data?.fileName || n.id.slice(0, 12) })) || []
+    .map((n: any) => ({ id: n.id, name: nodeName(n.id) })) || []
 })
-
-function nodeName(id: string): string {
-  const n = props.graphData?.nodes?.find((n: any) => n.id === id)
-  return n?.data?.fileName || id.slice(0, 12)
-}
 
 const addModal = reactive({
   visible: false,
+  mode: 'add' as 'add' | 'edit',
   kind: '' as 'RELAY' | 'PROXY' | 'GATEWAY' | 'ROAMING',
   pub: '',
   priv: '',
   roamType: 'flatten' as 'flatten' | 'nat',
+  enabled: true,
+  // the entry being edited (so an in-place edit isn't flagged as a duplicate)
+  origPub: '',
+  origPriv: '',
 })
 
 function startAdd(kind: 'RELAY' | 'PROXY' | 'GATEWAY' | 'ROAMING') {
-  addModal.visible = true
-  addModal.kind = kind
-  addModal.pub = ''
-  addModal.priv = ''
-  addModal.roamType = 'flatten'
+  Object.assign(addModal, {
+    visible: true, mode: 'add', kind,
+    pub: '', priv: '', roamType: 'flatten', enabled: true, origPub: '', origPriv: '',
+  })
 }
 
-// Does the same pair already exist in the SAME kind being added?
+// Edit = same modal, the row's current values pre-filled as defaults.
+function startEdit(kind: 'RELAY' | 'PROXY' | 'GATEWAY' | 'ROAMING', row: any) {
+  Object.assign(addModal, {
+    visible: true, mode: 'edit', kind,
+    pub: row.pub, priv: row.priv,
+    roamType: (row.type as 'flatten' | 'nat') || 'flatten',
+    enabled: row.enabled !== false,
+    origPub: row.pub, origPriv: row.priv,
+  })
+}
+
+// Does the same pair already exist in this kind — excluding the entry being edited?
 function sameKindExists(pub: string, priv: string): boolean {
+  if (addModal.mode === 'edit' && pub === addModal.origPub && priv === addModal.origPriv) return false
   const h = hm.value
   if (!h) return false
   if (addModal.kind === 'ROAMING') {
@@ -203,7 +231,6 @@ function sameKindExists(pub: string, priv: string): boolean {
 
 function canAdd(): boolean {
   if (!addModal.pub || !addModal.priv || addModal.pub === addModal.priv) return false
-  // Same-kind duplicate not allowed (Relay/Proxy/Gateway can coexist for a pair)
   if (sameKindExists(addModal.pub, addModal.priv)) return false
   return true
 }
@@ -217,13 +244,22 @@ const addError = computed(() => {
   return ''
 })
 
+// Add appends a new entry; edit updates the matching entry IN PLACE so it keeps
+// its list position (a remove+add would push it to the bottom).
 function confirmAdd() {
   if (!canAdd()) return
-  const { kind, pub, priv, roamType } = addModal
-  if (kind === 'RELAY') draftStore.addRelay(pub, priv)
-  else if (kind === 'PROXY') draftStore.addProxy(pub, priv)
-  else if (kind === 'GATEWAY') draftStore.addGateway(pub, priv)
-  else if (kind === 'ROAMING') draftStore.addRoamingEntry(pub, priv, roamType)
+  const { mode, kind, pub, priv, roamType, enabled, origPub, origPriv } = addModal
+  if (mode === 'edit') {
+    if (kind === 'RELAY') draftStore.updateRelay(origPub, origPriv, pub, priv, enabled)
+    else if (kind === 'PROXY') draftStore.updateProxy(origPub, origPriv, pub, priv, enabled)
+    else if (kind === 'GATEWAY') draftStore.updateGateway(origPub, origPriv, pub, priv, enabled)
+    else if (kind === 'ROAMING') draftStore.updateRoamingEntry(origPub, origPriv, pub, priv, roamType, enabled)
+  } else {
+    if (kind === 'RELAY') draftStore.addRelay(pub, priv, enabled)
+    else if (kind === 'PROXY') draftStore.addProxy(pub, priv, enabled)
+    else if (kind === 'GATEWAY') draftStore.addGateway(pub, priv, enabled)
+    else if (kind === 'ROAMING') draftStore.addRoamingEntry(pub, priv, roamType, enabled)
+  }
   addModal.visible = false
 }
 </script>

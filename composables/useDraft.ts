@@ -9,7 +9,8 @@
 
 import type { SyncConfig, PeerExtraConfig, P2PConfig } from '~/types'
 import { deriveGraphData, type GraphBase } from '~/composables/useGraphDerive'
-import { renderHybridMesh, addDeclaration, removeDeclaration, addRoaming, removeRoaming } from '~/composables/useHybridMesh'
+import { addDeclaration, removeDeclaration, updateDeclaration, addRoaming, removeRoaming, updateRoaming } from '~/composables/useHybridMesh'
+import { buildHistories, renderConfig } from '~/composables/useRenderModel'
 import { authFetch } from '~/composables/useAuth'
 
 const EMPTY_CONFIG: SyncConfig = {
@@ -29,6 +30,8 @@ export function useDraft() {
     basePeers: [],
     centerPubKey: '',
     onlineEndpoints: {},
+    interfaceInfo: null,
+    globalDefaults: {},
   }))
   const persisted = useState<SyncConfig>('draft-persisted', () => clone(EMPTY_CONFIG))
   const draft = useState<SyncConfig>('draft-current', () => clone(EMPTY_CONFIG))
@@ -45,10 +48,12 @@ export function useDraft() {
     hiddenVirtualGroups.value = s
   }
 
-  // Live-derived graph from the draft — render HYBRID_MESH intent first,
-  // then derive graph from the rendered config.
+  // Single recording pass: per-field changelogs for every Peer/Connection.
+  const renderModel = computed(() => buildHistories(base.value, draft.value))
+
+  // Live-derived graph — render via the SAME model (no second buildHistories).
   const graphData = computed(() => {
-    const rendered = renderHybridMesh(draft.value, base.value)
+    const rendered = renderConfig(base.value, draft.value, renderModel.value)
     return deriveGraphData(base.value, rendered, hiddenVirtualGroups.value)
   })
 
@@ -56,13 +61,14 @@ export function useDraft() {
     JSON.stringify(persisted.value) !== JSON.stringify(draft.value)
   )
 
-  // --- Load from backend ---
   async function load() {
     const data = await authFetch('/api/admin/graph') as any
     base.value = {
       basePeers: data.basePeers || [],
       centerPubKey: data.centerPubKey || '',
       onlineEndpoints: data.onlineEndpoints || {},
+      interfaceInfo: data.interfaceInfo || null,
+      globalDefaults: data.globalDefaults || {},
     }
     persisted.value = clone(data.config)
     draft.value = clone(data.config)
@@ -141,37 +147,49 @@ export function useDraft() {
   // These modify the HYBRID_MESH declarations (intent), NOT ALLOWED_IPS directly.
   // The renderer (renderHybridMesh) converts intent → ALLOWED_IPS at display time.
 
-  function addRelay(pub: string, priv: string) {
-    draft.value.HYBRID_MESH = addDeclaration(draft.value.HYBRID_MESH, 'RELAY', pub, priv)
+  function addRelay(pub: string, priv: string, enabled = true) {
+    draft.value.HYBRID_MESH = addDeclaration(draft.value.HYBRID_MESH, 'RELAY', pub, priv, enabled)
   }
   function removeRelay(pub: string, priv: string) {
     draft.value.HYBRID_MESH = removeDeclaration(draft.value.HYBRID_MESH, 'RELAY', pub, priv)
   }
-  function addProxy(pub: string, priv: string) {
-    draft.value.HYBRID_MESH = addDeclaration(draft.value.HYBRID_MESH, 'PROXY', pub, priv)
+  function addProxy(pub: string, priv: string, enabled = true) {
+    draft.value.HYBRID_MESH = addDeclaration(draft.value.HYBRID_MESH, 'PROXY', pub, priv, enabled)
   }
   function removeProxy(pub: string, priv: string) {
     draft.value.HYBRID_MESH = removeDeclaration(draft.value.HYBRID_MESH, 'PROXY', pub, priv)
   }
   // Gateway: PUBLIC=high(exit A), PRIVATE=low(B). B→A edge.
-  function addGateway(pub: string, priv: string) {
-    draft.value.HYBRID_MESH = addDeclaration(draft.value.HYBRID_MESH, 'GATEWAY', pub, priv)
+  function addGateway(pub: string, priv: string, enabled = true) {
+    draft.value.HYBRID_MESH = addDeclaration(draft.value.HYBRID_MESH, 'GATEWAY', pub, priv, enabled)
   }
   function removeGateway(pub: string, priv: string) {
     draft.value.HYBRID_MESH = removeDeclaration(draft.value.HYBRID_MESH, 'GATEWAY', pub, priv)
   }
-  function addRoamingEntry(pub: string, priv: string, type: 'flatten' | 'nat') {
-    draft.value.HYBRID_MESH = addRoaming(draft.value.HYBRID_MESH, pub, priv, type)
+  function addRoamingEntry(pub: string, priv: string, type: 'flatten' | 'nat', enabled = true) {
+    draft.value.HYBRID_MESH = addRoaming(draft.value.HYBRID_MESH, pub, priv, type, enabled)
   }
   function removeRoamingEntry(pub: string, priv: string) {
     draft.value.HYBRID_MESH = removeRoaming(draft.value.HYBRID_MESH, pub, priv)
+  }
+  // In-place edits — keep the entry's list position (remove+add would reorder it).
+  function updateRelay(origPub: string, origPriv: string, pub: string, priv: string, enabled = true) {
+    draft.value.HYBRID_MESH = updateDeclaration(draft.value.HYBRID_MESH, 'RELAY', origPub, origPriv, pub, priv, enabled)
+  }
+  function updateProxy(origPub: string, origPriv: string, pub: string, priv: string, enabled = true) {
+    draft.value.HYBRID_MESH = updateDeclaration(draft.value.HYBRID_MESH, 'PROXY', origPub, origPriv, pub, priv, enabled)
+  }
+  function updateGateway(origPub: string, origPriv: string, pub: string, priv: string, enabled = true) {
+    draft.value.HYBRID_MESH = updateDeclaration(draft.value.HYBRID_MESH, 'GATEWAY', origPub, origPriv, pub, priv, enabled)
+  }
+  function updateRoamingEntry(origPub: string, origPriv: string, pub: string, priv: string, type: 'flatten' | 'nat', enabled = true) {
+    draft.value.HYBRID_MESH = updateRoaming(draft.value.HYBRID_MESH, origPub, origPriv, pub, priv, type, enabled)
   }
 
   function updateGlobal(patch: Partial<Pick<SyncConfig, 'GLOBAL_LISTEN_PORT' | 'GLOBAL_DNS' | 'GLOBAL_SCRIPTS'>>) {
     Object.assign(draft.value, patch)
   }
 
-  // --- Commit / discard ---
   async function commit() {
     const saved = await authFetch('/api/admin/config-bulk', {
       method: 'PUT',
@@ -192,6 +210,7 @@ export function useDraft() {
     loaded,
     previewOpen,
     graphData,
+    renderModel,
     hiddenVirtualGroups,
     toggleVirtualGroupVisible,
     isDirty,
@@ -207,12 +226,16 @@ export function useDraft() {
     removeFromGroup,
     addRelay,
     removeRelay,
+    updateRelay,
     addProxy,
     removeProxy,
+    updateProxy,
     addGateway,
     removeGateway,
+    updateGateway,
     addRoamingEntry,
     removeRoamingEntry,
+    updateRoamingEntry,
     updateGlobal,
     commit,
     discard,

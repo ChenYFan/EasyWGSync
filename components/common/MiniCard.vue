@@ -1,7 +1,7 @@
 <template>
   <div
-    class="mini-card rounded-md border border-border bg-card px-3 py-2 cursor-pointer hover:border-foreground/30 transition-colors"
-    :class="full ? 'w-full' : 'w-[calc(50%-0.375rem)] min-w-0'"
+    class="mini-card h-full rounded-md border border-border bg-card px-3 py-2 cursor-pointer hover:border-foreground/30 transition-colors"
+    :class="full ? 'w-full col-span-2' : 'w-full min-w-0'"
     @click="$emit('click')"
   >
     <!-- Node type: name, pubkey, ip (ipv6 only if no ipv4) -->
@@ -12,8 +12,7 @@
       </div>
       <div v-if="comment" class="text-[10px] text-muted-foreground mt-0.5 italic" style="overflow-wrap: break-word;">{{ comment }}</div>
       <div v-if="pubkey" class="text-[10px] font-mono text-muted-foreground mt-0.5 break-all">{{ pubkey }}</div>
-      <div v-if="ipv4" class="text-[10px] font-mono text-muted-foreground break-all">{{ ipv4 }}</div>
-      <div v-else-if="!ipv4 && ipv6" class="text-[10px] font-mono text-muted-foreground break-all">{{ ipv6 }}</div>
+      <div v-for="(ip, i) in ipLines" :key="i" class="text-[10px] font-mono text-muted-foreground break-all">{{ ip }}</div>
     </template>
 
     <!-- Group type: group name, color dot, member count -->
@@ -33,7 +32,9 @@
 </template>
 
 <script setup lang="ts">
-defineProps<{
+import { classifyIP } from '~/composables/useWgConfigParser'
+
+const props = defineProps<{
   type: 'node' | 'group'
   name: string
   full?: boolean
@@ -51,4 +52,20 @@ defineProps<{
 defineEmits<{
   click: []
 }>()
+
+// IPs shown in the card, one per line (comma-split). Each token is validated:
+// real IPv4 (with optional CIDR) first, then real IPv6, then anything that is
+// neither (kept last so malformed content is surfaced, not silently dropped).
+const ipLines = computed(() => {
+  const parts = [props.ipv4, props.ipv6]
+    .filter(Boolean)
+    .join(',')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+  const v4 = parts.filter(p => classifyIP(p) === 'v4')
+  const v6 = parts.filter(p => classifyIP(p) === 'v6')
+  const other = parts.filter(p => classifyIP(p) === null)
+  return [...v4, ...v6, ...other]
+})
 </script>

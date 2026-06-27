@@ -48,8 +48,6 @@ interface ViewState {
 export type VisualState = 'selected' | 'semi' | 'normal' | 'dimmed'
 
 // Opacity per visual state, per object kind.
-// node/edge: selected(1 + glow) / semi(0.6) / normal(1, no selection) / dimmed(0.1)
-// group:     selected(1)        / semi(0.4) / normal(0.1)             / dimmed(0.03)
 const NODE_OPACITY: Record<VisualState, number> = { selected: 1, semi: 0.6, normal: 1, dimmed: 0.1 }
 const EDGE_OPACITY: Record<VisualState, number> = { selected: 1, semi: 0.6, normal: 1, dimmed: 0.1 }
 const GROUP_OPACITY: Record<VisualState, number> = { selected: 1, semi: 0.4, normal: 0.1, dimmed: 0.01 }
@@ -70,7 +68,6 @@ function computeStates(data: GraphData, viewState: ViewState) {
 
   const hasSelection = !!(viewState.selectedGroup || viewState.selectedNode || viewState.selectedEdge)
 
-  // Default state
   for (const n of data.nodes) nodeState.set(n.id, hasSelection ? 'dimmed' : 'normal')
   for (const e of data.edges) edgeState.set(`${e.source}->${e.target}`, hasSelection ? 'dimmed' : 'normal')
   for (const g of Object.keys(data.meshGroups)) groupState.set(g, hasSelection ? 'dimmed' : 'normal')
@@ -92,7 +89,7 @@ function computeStates(data: GraphData, viewState: ViewState) {
   } else if (viewState.selectedEdge) {
     const { source, target } = viewState.selectedEdge
     edgeState.set(`${source}->${target}`, 'selected')
-    edgeState.set(`${target}->${source}`, 'semi') // reverse edge
+    edgeState.set(`${target}->${source}`, 'semi')
     nodeState.set(source, 'selected')
     nodeState.set(target, 'selected')
     // Groups containing both endpoints => semi
@@ -200,7 +197,6 @@ export function buildVueFlowElements(
   // Unified visual states for nodes / edges / groups
   const { nodeState, edgeState } = computeStates(data, viewState)
 
-  // Build peer nodes
   const nodePositions = new Map<string, { x: number; y: number; width: number; height: number }>()
 
   for (const node of data.nodes) {
@@ -225,11 +221,9 @@ export function buildVueFlowElements(
     })
   }
 
-  // Build group boxes
   const groupNodes = computeGroupBoxes(data.meshGroups, nodePositions, viewState)
   vfNodes.push(...groupNodes)
 
-  // Build edges
   //
   // === 边点击命中 bug 说明（见 MeshCanvas.vue 的 .vue-flow__edge-interaction CSS）===
   // Vue Flow 每条边画两个 SVG path：edge-path（可见线）+ edge-interaction（20px 透明命中带）。
@@ -256,7 +250,6 @@ export function buildVueFlowElements(
     handleAbsPos.set(node.id, map)
   }
 
-  // For getValidSides we also need per-node dimensions
   const getNodeW = (id: string) => nodeDimensions?.get(id)?.width || 450
   const getNodeH = (id: string) => nodeDimensions?.get(id)?.height || 160
 
@@ -313,7 +306,6 @@ export function buildVueFlowElements(
         }
       }
 
-      // Record as first connection for this pair
       pairHistory.set(pairKey, { srcH: srcHandle, tgtH: tgtHandle })
     } else {
       // Step 5: 已有 A-B 连接 (A-1, B-1)。
@@ -404,7 +396,6 @@ export function buildVueFlowElements(
       }
     }
 
-    // Record usage
     handleUsage.set(`${edge.source}:${srcHandle}`, (handleUsage.get(`${edge.source}:${srcHandle}`) || 0) + 1)
     handleUsage.set(`${edge.target}:${tgtHandle}`, (handleUsage.get(`${edge.target}:${tgtHandle}`) || 0) + 1)
 
@@ -450,7 +441,6 @@ export function buildVueFlowElements(
   return { nodes: vfNodes, edges: vfEdges }
 }
 
-// Determine which side of nodeA faces nodeB
 function getFacingSide(aPos: { x: number; y: number }, bPos: { x: number; y: number }): string {
   const nodeW = 450, nodeH = 160
   const aCx = aPos.x + nodeW / 2
@@ -461,7 +451,6 @@ function getFacingSide(aPos: { x: number; y: number }, bPos: { x: number; y: num
   const dx = bCx - aCx
   const dy = bCy - aCy
 
-  // Compare angle to determine closest side
   if (Math.abs(dx) * nodeH > Math.abs(dy) * nodeW) {
     return dx > 0 ? 'r' : 'l'
   } else {
@@ -469,7 +458,6 @@ function getFacingSide(aPos: { x: number; y: number }, bPos: { x: number; y: num
   }
 }
 
-// Get valid sides of A that face toward B based on relative position
 function getValidSides(aPos: { x: number; y: number }, bPos: { x: number; y: number }): string[] {
   const nodeW = 450, nodeH = 160
   const aCx = aPos.x + nodeW / 2
@@ -490,7 +478,6 @@ function getValidSides(aPos: { x: number; y: number }, bPos: { x: number; y: num
 // Get candidate handles on valid sides (including corners that touch those sides)
 function getCandidateHandles(validSides: string[]): typeof HANDLE_POINTS {
   return HANDLE_POINTS.filter(hp => {
-    // Side handles
     if (validSides.includes(hp.side)) return true
     // Corner handles: 'tl' is valid if 't' or 'l' is valid
     if (hp.side.length === 2) {
@@ -504,7 +491,6 @@ function getHandleOnSide(side: string, pct: number): string {
   return `source-${side}-${pct}`
 }
 
-// Check if two handles are on the same side (or corner touching the same side)
 function sameSideAs(a: typeof HANDLE_POINTS[0], b: typeof HANDLE_POINTS[0]): boolean {
   if (a.side === b.side) return true
   // Corner shares side with edge: 'tl' shares with 't' and 'l'
@@ -538,7 +524,6 @@ const HANDLE_POINTS: { id: string; rx: number; ry: number; side: string; penalty
   return pts
 })()
 
-// Force-directed layout
 function forceLayout(
   nodes: any[],
   edges: any[],

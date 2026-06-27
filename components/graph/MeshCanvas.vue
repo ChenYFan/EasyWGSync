@@ -18,7 +18,6 @@
     <Controls position="bottom-right" />
     <MiniMap position="bottom-left" :node-color="miniMapNodeColor" />
 
-    <!-- Debug legend -->
     <div v-if="debug" class="absolute top-2 left-2 z-50 bg-card border border-border rounded-md px-3 py-2 text-[11px] space-y-1 pointer-events-none">
       <div class="font-medium text-foreground mb-1">点击命中区 (D 切换)</div>
       <div class="flex items-center gap-2"><span class="w-3 h-3 rounded-sm" style="background: rgba(59,130,246,0.25); outline: 1px solid #3b82f6" /> Node (可点击)</div>
@@ -70,6 +69,10 @@ function onDebugKey(e: KeyboardEvent) {
 
 const { getNodes, setNodes, getEdges, setEdges } = useVueFlow()
 
+// User-dragged node positions (persisted to localStorage, applied after layout).
+const nodePositions = useNodePositions()
+nodePositions.hydrate()
+
 const initialized = ref(false)
 
 // Compute elements (only used for initial render and edge recalc)
@@ -88,7 +91,9 @@ const frozenEdges = shallowRef<any[]>([])
 
 watch(elements, (val) => {
   if (!initialized.value && val.nodes.length > 0) {
-    frozenNodes.value = val.nodes
+    // Lay out normally, then move any node the user has dragged before to its
+    // cached position.
+    frozenNodes.value = nodePositions.applyTo(val.nodes)
     frozenEdges.value = val.edges
   }
 }, { immediate: true })
@@ -190,7 +195,11 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onDebugKey)
 })
 
-function onNodeDragStop() {
+function onNodeDragStop({ node }: any) {
+  // Persist the dragged peer's new position (groups are derived boxes, skip).
+  if (node?.type === 'peer' && node.position) {
+    nodePositions.set(node.id, node.position)
+  }
   nextTick(() => recalcAll())
 }
 
@@ -198,6 +207,22 @@ function onNodesReady() {
   initialized.value = true
   setTimeout(() => recalcAll(), 200)
 }
+
+// "Reset All Positions": drop the cached layout and move every peer node back to
+// its freshly-computed default position, then rebuild group boxes + edges.
+watch(() => nodePositions.resetTick.value, () => {
+  if (!initialized.value) return
+  const layout = elements.value
+  const current = getNodes.value
+  const peers = layout.nodes
+    .filter(ln => ln.type === 'peer')
+    .map((ln) => {
+      const ex = current.find(n => n.id === ln.id)
+      return ex ? { ...ex, position: { ...ln.position } } : ln
+    })
+  setNodes(peers)
+  nextTick(() => recalcAll())
+})
 
 // Single unified recalc: reads real positions + dimensions from DOM, updates groups + edges
 function recalcAll() {

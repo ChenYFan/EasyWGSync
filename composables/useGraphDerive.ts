@@ -5,13 +5,17 @@
 // moved client-side so the draft can recompute the graph instantly without
 // hitting the backend. Output shape matches what EasyWGSyncModel / panels expect.
 
-import type { SyncConfig } from '~/types'
+import type { SyncConfig, DefaultPeerConfig, WGDInterfaceInfo, WGDGlobalDefaults } from '~/types'
+import { TopologyModel, normalizeMeshGroups } from '~/composables/useTopology'
 
 export interface GraphBase {
-  basePeers: { publicKey: string; fileName: string; address: string; isOnline: boolean }[]
+  basePeers: { publicKey: string; fileName: string; isOnline: boolean; default: DefaultPeerConfig }[]
   centerPubKey: string
   onlineEndpoints: Record<string, string>
+  interfaceInfo?: WGDInterfaceInfo | null
+  globalDefaults?: WGDGlobalDefaults
 }
+
 
 export interface DerivedGraph {
   nodes: any[]
@@ -37,6 +41,11 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
   // CENTER node first
   if (centerPubKey) {
     knownPubKeys.add(centerPubKey)
+    // CENTER's real interface address + listen port come from WGDashboard's
+    // interfaceInfo (it has no peer .conf). Endpoint falls back to the listen
+    // port when no explicit host endpoint is reported.
+    const ifAddr = base.interfaceInfo?.Address?.trim()
+    const ifPort = base.interfaceInfo?.ListenPort
     nodes.push({
       id: centerPubKey,
       type: 'peer',
@@ -44,10 +53,10 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
         publicKey: centerPubKey,
         fileName: 'CENTER',
         comments: '',
-        endpoint: null,
+        endpoint: onlineEndpoints[centerPubKey] || (ifPort ? `:${ifPort}` : null),
         isOnline: true,
         isCenter: true,
-        address: 'ALL',
+        address: ifAddr || 'ALL',
         dns: null,
         groups: ['CENTER_GROUP'] as string[],
       },
@@ -60,6 +69,7 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
     if (!pubKey || knownPubKeys.has(pubKey)) continue
     knownPubKeys.add(pubKey)
     const extra = EXTRA[pubKey]
+    const dflt = peer.default
     nodes.push({
       id: pubKey,
       type: 'peer',
@@ -70,8 +80,8 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
         endpoint: extra?.ENDPOINT || onlineEndpoints[pubKey] || null,
         isOnline: peer.isOnline,
         isCenter: false,
-        address: peer.address,
-        dns: extra?.DNS || null,
+        address: dflt?.address.join(', ') || '',
+        dns: extra?.DNS || dflt?.dns?.[0] || null,
         groups: [] as string[],
       },
     })
@@ -99,18 +109,9 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
     })
   }
 
-  // Normalize MESH_GROUPS: legacy string[] or new {PEERS, ENABLED} → {members, enabled}
-  const MESH_NORMAL: Record<string, { members: string[]; enabled: boolean }> = {}
-  for (const [name, g] of Object.entries(MESH)) {
-    if (Array.isArray(g)) {
-      MESH_NORMAL[name] = { members: g, enabled: true }
-    } else {
-      const gv = g as any
-      MESH_NORMAL[name] = { members: gv.PEERS || [], enabled: gv.ENABLED !== false }
-    }
-  }
+  // Normalize MESH_GROUPS (shared helper) → {members, enabled}
+  const MESH_NORMAL = normalizeMeshGroups(MESH)
 
-  // Mesh groups + virtual groups
   const meshGroups: DerivedGraph['meshGroups'] = {}
   for (const [name, g] of Object.entries(MESH_NORMAL)) {
     meshGroups[name] = { members: [...g.members], comment: '', virtual: false, enabled: g.enabled }
@@ -198,6 +199,9 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
   //  - peer→center (isToCenter): editable, config stored in P2P_CONFIG.CENTRAL_NODE
   //  - center→peer (isFromCenter): read-only
   // Both share CENTER_GROUP; skip entirely if CENTER_GROUP is hidden.
+  // p2pAllowedIPs comes from the RENDERED config (renderConfig materializes the
+  // implicit center-gateway /24 or the demoted /32 into CENTRAL_NODE.ALLOWED_IPS),
+  // so the GW marker reflects the virtual-gateway state without special-casing.
   if (centerPubKey && !hiddenGroups?.has('CENTER_GROUP')) {
     for (const peerKey of allPeerKeys) {
       const centralP2p = EXTRA[peerKey]?.P2P_CONFIG?.['CENTRAL_NODE']
@@ -273,51 +277,33 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
     }
   }
 
-  // Attach to nodes
   for (const n of nodes) {
     n.data.relays = relays[n.id] || []
     n.data.proxies = proxies[n.id] || []
   }
 
-  // === Gateway identification ===
-  // A is B's gateway if B->A connection ALLOWED_IPS contains whole domain (/24 or /80).
-  // Derive center segments from node /32 addresses (compute the /24 /80 they belong to).
-  let segV4 = ''
-  let segV6 = ''
-  const toNetwork = (cidr: string, prefix: number): string | null => {
-    const m = cidr.match(/^([\d.]+)\/\d+$/)
-    if (!m) return null
-    const parts = m[1].split('.').map(Number)
-    const ip = (parts[0] << 24 >>> 0) | (parts[1] << 16 >>> 0) | (parts[2] << 8 >>> 0) | parts[3]
-    const mask = prefix === 0 ? 0 : ((~0 << (32 - prefix)) >>> 0)
-    const net = (ip & mask) >>> 0
-    return `${(net >>> 24) & 255}.${(net >>> 16) & 255}.${(net >>> 8) & 255}.${net & 255}/${prefix}`
-  }
-  const toV6Network = (cidr: string, prefix: number): string | null => {
-    // Simple: just return the cidr with the given prefix if it's a /80-ish address.
-    // For v6 we match the prefix length directly.
-    const m = cidr.match(/^[0-9a-fA-F:]+\/\d+$/)
-    if (!m) return null
-    // Truncate to network - for simplicity just compare prefix lengths, keep original address base
-    return cidr.replace(/\/\d+$/, `/${prefix}`)
-  }
-  for (const n of nodes) {
-    const addr = n.data?.address || ''
-    for (const ip of addr.split(',').map((s: string) => s.trim())) {
-      if (!segV4 && ip.includes('.')) {
-        const net = toNetwork(ip, 24)
-        if (net) segV4 = net
-      }
-      if (!segV6 && ip.includes(':')) {
-        const net = toV6Network(ip, 80)
-        if (net) segV6 = net
-      }
-    }
-    if (segV4 && segV6) break
-  }
+  // === Gateway identification (edge-as-fact) ===
+  // A gateway edge is one whose rendered p2pAllowedIPs contains the whole
+  // domain network (v4 and/or v6, prefix derived by TopologyModel). This
+  // reflects the virtual-gateway model: default X→CENTER has the domain network
+  // stacked by the implicit center-gateway declaration (gateway); when X
+  // explicitly roams via another exit that declaration is dropped and X→CENTER
+  // falls back to CENTER's host IP (not a gateway); explicit gateway edges
+  // carry the domain network. p2pAllowedIPs comes from the rendered config, so
+  // no special-casing here.
+  const topo = new TopologyModel(base, config)
+  const { v4: segV4, v6: segV6 } = topo.getDomainNetworks()
   for (const edge of edges) {
     const ips = edge.data?.p2pAllowedIPs || []
     edge.data.isGateway = ips.some((ip: string) => ip === segV4 || ip === segV6)
+  }
+
+  // Stamp CENTER's real own IP(s) onto the CENTER node (display address stays
+  // 'ALL'). Single source for graph-side consumers (findNodeByIp, the CENTER
+  // routing table) so none of them re-derive it. From interfaceInfo.Address.
+  if (centerPubKey) {
+    const centerNode = nodes.find((n: any) => n.data?.isCenter)
+    if (centerNode) centerNode.data.ownIPs = topo.getCenterOwnIPs()
   }
 
   return {

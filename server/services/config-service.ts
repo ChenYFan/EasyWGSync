@@ -11,7 +11,6 @@ import type { SyncConfig, PeerExtraConfig, P2PConfig } from '~/types'
 type GlobalConfig = Pick<SyncConfig, 'GLOBAL_LISTEN_PORT' | 'GLOBAL_DNS' | 'GLOBAL_SCRIPTS'>
 
 export const configService = {
-  // === Full snapshot (for aggregation, e.g. graph endpoint) ===
   async getAll(): Promise<SyncConfig> {
     return readSyncConfig()
   },
@@ -22,7 +21,6 @@ export const configService = {
     return updateSyncConfig(() => config)
   },
 
-  // === Global settings ===
   async getGlobal(): Promise<GlobalConfig> {
     const c = await readSyncConfig()
     return {
@@ -46,7 +44,6 @@ export const configService = {
     }
   },
 
-  // === Peer EXTRA_CONFIG ===
   async getPeer(pubkey: string): Promise<PeerExtraConfig> {
     const c = await readSyncConfig()
     return c.EXTRA_CONFIG[pubkey] || {}
@@ -67,7 +64,6 @@ export const configService = {
     })
   },
 
-  // === Mesh Groups ===
   async listGroups(): Promise<Record<string, { PEERS: string[]; ENABLED: boolean }>> {
     const c = await readSyncConfig()
     const out: Record<string, { PEERS: string[]; ENABLED: boolean }> = {}

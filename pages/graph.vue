@@ -1,7 +1,19 @@
 <template>
-  <div class="h-full flex" @click="closeContextMenu" @contextmenu.prevent>
-    <!-- Sidebar -->
-    <aside class="w-64 border-r border-border p-4 flex flex-col gap-4 overflow-y-auto">
+  <div class="h-full flex relative" @click="closeContextMenu" @contextmenu.prevent>
+    <!-- Mobile drawer backdrop (below lg, only when open) -->
+    <div
+      v-if="mobileSidebarOpen"
+      class="lg:hidden fixed inset-0 top-14 bg-background/60 z-30"
+      @click="closeSidebar"
+    />
+    <!-- Mesh Groups sidebar. Static column at lg+; off-canvas drawer below lg. -->
+    <aside
+      class="border-r border-border p-4 flex flex-col gap-4 overflow-y-auto bg-background
+             w-64 shrink-0
+             max-lg:fixed max-lg:inset-y-0 max-lg:top-14 max-lg:left-0 max-lg:z-40 max-lg:w-72 max-lg:shadow-xl
+             max-lg:transition-transform max-lg:duration-200"
+      :class="mobileSidebarOpen ? 'max-lg:translate-x-0' : 'max-lg:-translate-x-full'"
+    >
       <div class="space-y-2">
         <div class="flex items-center justify-between">
           <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Mesh Groups</h2>
@@ -10,62 +22,65 @@
             class="text-xs text-muted-foreground hover:text-foreground"
           >+ New</button>
         </div>
-        <!-- Virtual groups first -->
-        <template v-for="(group, name) in meshGroups" :key="name">
+        <!-- Virtual groups first, then real — each expandable to list members -->
+        <div
+          v-for="{ name, group } in sortedGroups"
+          :key="name"
+          class="rounded-md transition-colors"
+          :class="{
+            'bg-secondary': selectedGroup === name,
+            'bg-secondary/30': !selectedGroup && selectedPeer && group.members.includes(selectedPeer),
+            'bg-warning/10 border border-warning/50': group.enabled === false,
+          }"
+        >
           <div
-            v-if="group.virtual"
-            class="flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-sm transition-colors"
-            :class="{
-              'bg-secondary': selectedGroup === name,
-              'bg-secondary/30': !selectedGroup && selectedPeer && group.members.includes(selectedPeer),
-              'hover:bg-secondary/50': selectedGroup !== name,
-            }"
-            @click="selectGroup(name as string)"
-            @contextmenu.prevent="onGroupRightClick($event, name as string)"
+            class="flex items-center gap-1.5 px-2 py-1.5 rounded-md cursor-pointer text-sm"
+            :class="{ 'hover:bg-secondary/50': selectedGroup !== name && group.enabled !== false }"
+            @click="selectGroup(name)"
+            @contextmenu.prevent="onGroupRightClick($event, name)"
           >
-            <span class="w-2.5 h-2.5 rounded-full shrink-0" :style="{ backgroundColor: getGroupColor(name as string) }" />
+            <button
+              class="shrink-0 w-4 h-4 flex items-center justify-center text-[9px] text-muted-foreground hover:text-foreground transition-transform"
+              :class="expandedGroups.has(name) ? 'rotate-90' : ''"
+              @click.stop="toggleGroupExpand(name)"
+            >▶</button>
+            <span class="w-2.5 h-2.5 rounded-full shrink-0" :style="{ backgroundColor: getGroupColor(name) }" />
             <span class="truncate text-foreground">{{ name }}</span>
-            <span class="text-[9px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground ml-1">Virtual</span>
+            <span v-if="group.virtual" class="text-[9px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground ml-1">Virtual</span>
+            <span v-else-if="group.enabled === false" class="text-[9px] px-1.5 py-0.5 rounded-full bg-warning/20 text-warning ml-1">Disabled</span>
             <span class="ml-auto text-xs text-muted-foreground">{{ group.members.length }}</span>
           </div>
-        </template>
-        <!-- Real groups -->
-        <template v-for="(group, name) in meshGroups" :key="name">
-          <div
-            v-if="!group.virtual"
-            class="flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-sm transition-colors"
-            :class="{
-              'bg-secondary': selectedGroup === name,
-              'bg-secondary/30': !selectedGroup && selectedPeer && group.members.includes(selectedPeer),
-              'bg-destructive/15 border border-destructive/40': group.enabled === false,
-              'hover:bg-secondary/50': selectedGroup !== name && group.enabled !== false,
-            }"
-            @click="selectGroup(name as string)"
-            @contextmenu.prevent="onGroupRightClick($event, name as string)"
-          >
-            <span class="w-2.5 h-2.5 rounded-full shrink-0" :style="{ backgroundColor: getGroupColor(name as string) }" />
-            <span class="truncate text-foreground">{{ name }}</span>
-            <span v-if="group.enabled === false" class="text-[9px] px-1.5 py-0.5 rounded-full bg-destructive/20 text-destructive ml-1">Disabled</span>
-            <span class="ml-auto text-xs text-muted-foreground">{{ group.members.length }}</span>
+          <div v-if="expandedGroups.has(name)" class="pl-7 pr-2 pb-1.5 space-y-0.5">
+            <div
+              v-for="m in groupMemberInfo(name)"
+              :key="m.id"
+              class="text-xs truncate cursor-pointer py-0.5"
+              :class="selectedPeer === m.id ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'"
+              @click.stop="onNodeClick(m.id)"
+            >{{ m.name }}</div>
+            <p v-if="!group.members.length" class="text-[11px] text-muted-foreground/50 py-0.5">无成员</p>
           </div>
-        </template>
+        </div>
       </div>
 
       <div class="mt-auto pt-4 border-t border-border space-y-1">
         <button
-          @click="showHybridMesh = true"
-          class="w-full text-left text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-md hover:bg-secondary"
+          @click="toggleTool('hybrid')"
+          class="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-secondary"
+          :class="showHybridMesh ? 'text-foreground bg-secondary' : 'text-muted-foreground hover:text-foreground'"
         >Hybrid Mesh</button>
         <button
-          @click="showHealthCheck = true"
-          class="w-full text-left text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-md hover:bg-secondary flex items-center justify-between"
+          @click="toggleTool('health')"
+          class="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-secondary flex items-center justify-between"
+          :class="showHealthCheck ? 'text-foreground bg-secondary' : 'text-muted-foreground hover:text-foreground'"
         >
           <span>Health Check</span>
           <span v-if="conflictCount > 0" class="text-[10px] px-1.5 py-0.5 rounded-full bg-destructive/20 text-destructive">{{ conflictCount }}</span>
         </button>
         <button
-          @click="openGlobalConfig"
-          class="w-full text-left text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-md hover:bg-secondary"
+          @click="toggleTool('global')"
+          class="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-secondary"
+          :class="showGlobalConfig ? 'text-foreground bg-secondary' : 'text-muted-foreground hover:text-foreground'"
         >Global Settings</button>
       </div>
     </aside>
@@ -101,6 +116,7 @@
       @save="savePeer"
       @select-node="onNodeClick"
       @select-group="selectGroup"
+      @goto-hybrid="onGotoHybrid"
     />
     <EdgeEditPanel
       v-else-if="activePanel === 'edge'"
@@ -112,6 +128,7 @@
       @reset="resetEdge"
       @select-node="onNodeClick"
       @select-group="selectGroup"
+      @goto-hybrid="onGotoHybrid"
     />
     <GroupEditPanel
       v-else-if="activePanel === 'group'"
@@ -133,19 +150,20 @@
     <GlobalConfigPanel
       v-else-if="activePanel === 'global'"
       :config="graphData.globalConfig"
-      @close="clearSelection"
+      @close="closeTool"
       @save="saveGlobalConfig"
     />
     <HealthCheckPanel
       v-else-if="activePanel === 'health'"
       :graph-data="graphData"
-      @close="clearSelection"
+      @close="closeTool"
       @select-node="onNodeClick"
     />
     <HybridMeshPanel
       v-else-if="activePanel === 'hybrid'"
       :graph-data="graphData"
-      @close="clearSelection"
+      :highlight="highlightDecl"
+      @close="closeTool"
     />
 
     <!-- Context Menu -->
@@ -163,6 +181,7 @@
       @remove-from-group="onRemoveFromGroup"
       @traceroute="onStartTrace"
       @relay-for="onRelayFor"
+      @proxy-for="onProxyFor"
       @add-peer="onAddPeerToGroup"
       @delete-group="onContextMenuDeleteGroup"
       @set-gateway="onSetGateway"
@@ -191,31 +210,24 @@
     />
 
     <!-- Create Group Modal -->
-    <div v-if="showCreateGroup" class="fixed inset-0 z-[200] flex items-center justify-center">
-      <div class="absolute inset-0 bg-background/80" @click="showCreateGroup = false" />
-      <div class="relative bg-card border border-border rounded-xl shadow-2xl w-[400px]">
-        <div class="h-12 flex items-center justify-between px-4 border-b border-border">
-          <span class="text-sm font-medium text-foreground">New Mesh Group</span>
-          <button @click="showCreateGroup = false" class="text-muted-foreground hover:text-foreground text-lg">&times;</button>
-        </div>
-        <div class="p-4 space-y-3">
-          <div>
-            <label class="text-[10px] uppercase tracking-wider text-muted-foreground">Group Name</label>
-            <input
-              v-model="newGroupName"
-              class="mt-1 w-full h-9 px-3 rounded-md border border-input bg-background text-sm text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-ring"
-              placeholder="e.g. OFFICE_MESH"
-              @keydown.enter="createGroup"
-            />
-            <p v-if="createGroupError" class="text-xs text-destructive mt-1">{{ createGroupError }}</p>
-          </div>
-        </div>
-        <div class="h-14 flex items-center justify-end gap-2 px-4 border-t border-border">
-          <button @click="showCreateGroup = false" class="h-8 px-3 rounded-md text-sm text-muted-foreground hover:text-foreground">Cancel</button>
-          <button @click="createGroup" class="h-8 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90">Create</button>
+    <ModalShell :visible="showCreateGroup" :z="200" title="New Mesh Group" @close="showCreateGroup = false">
+      <div class="p-4 space-y-3">
+        <div>
+          <label class="field-label">Group Name</label>
+          <input
+            v-model="newGroupName"
+            class="mt-1 w-full field-input font-mono"
+            placeholder="e.g. OFFICE_MESH"
+            @keydown.enter="createGroup"
+          />
+          <p v-if="createGroupError" class="text-xs text-destructive mt-1">{{ createGroupError }}</p>
         </div>
       </div>
-    </div>
+      <template #footer>
+        <button @click="showCreateGroup = false" class="btn-ghost">Cancel</button>
+        <button @click="createGroup" class="btn-primary">Create</button>
+      </template>
+    </ModalShell>
   </div>
 </template>
 
@@ -229,8 +241,34 @@ definePageMeta({ layout: 'default' })
 const draftStore = useDraft()
 const { graphData, loaded, persisted, draft, previewOpen } = draftStore
 
+// Mobile off-canvas sidebar (coordinated with the header hamburger).
+const { mobileSidebarOpen, closeSidebar } = useUiState()
+
 // Mesh groups (incl. virtual) derived live from the draft
 const meshGroups = computed(() => graphData.value.meshGroups)
+
+// Sidebar: virtual groups first, then real (insertion order preserved within each).
+const sortedGroups = computed(() => {
+  const entries = Object.entries(meshGroups.value) as [string, any][]
+  return [...entries.filter(([, g]) => g.virtual), ...entries.filter(([, g]) => !g.virtual)]
+    .map(([name, group]) => ({ name, group }))
+})
+
+// Per-group expand state in the sidebar (frontend-only).
+const expandedGroups = ref<Set<string>>(new Set())
+function toggleGroupExpand(name: string) {
+  const s = new Set(expandedGroups.value)
+  s.has(name) ? s.delete(name) : s.add(name)
+  expandedGroups.value = s
+}
+
+// Member nodes of a group, resolved to display name (CENTER flagged).
+function groupMemberInfo(name: string) {
+  return (meshGroups.value[name]?.members || []).map((id: string) => {
+    const n = graphData.value?.nodes?.find((nn: any) => nn.id === id)
+    return { id, name: n?.data?.fileName || id.slice(0, 12), isCenter: !!n?.data?.isCenter }
+  })
+}
 
 const selectedPeer = ref<string | null>(null)
 const selectedEdge = ref<any>(null)
@@ -244,6 +282,7 @@ const showHealthCheck = ref(false)
 const showHybridMesh = ref(false)
 const traceSource = ref<string | null>(null)
 const traceHighlight = ref<string[]>([])
+const highlightDecl = ref<{ pub: string; priv: string } | null>(null)
 
 // Context menu state
 const contextMenu = reactive({
@@ -268,13 +307,16 @@ function nodeHeader(nodeId: string): { name: string; sub: string } {
 }
 
 const activePanel = computed(() => {
-  if (selectedPeer.value) return 'peer'
-  if (selectedEdge.value) return 'edge'
-  if (selectedGroup.value) return 'group'
-  if (traceSource.value) return 'traceroute'
+  // Tool panels (opened from the bottom-left) take priority and coexist with a
+  // node/edge/group selection: the selection stays highlighted on the canvas
+  // underneath, and closing the tool falls back to that selection's panel.
   if (showGlobalConfig.value) return 'global'
   if (showHealthCheck.value) return 'health'
   if (showHybridMesh.value) return 'hybrid'
+  if (traceSource.value) return 'traceroute'
+  if (selectedPeer.value) return 'peer'
+  if (selectedEdge.value) return 'edge'
+  if (selectedGroup.value) return 'group'
   return null
 })
 
@@ -288,14 +330,45 @@ function clearSelection() {
   showHybridMesh.value = false
   traceSource.value = null
   traceHighlight.value = []
+  highlightDecl.value = null
 }
 
-function openGlobalConfig() {
+// Close only the tool panels (keep any node/edge/group selection so we fall
+// back to its panel). Used by the bottom-left panels' close buttons.
+function closeTool() {
+  showGlobalConfig.value = false
+  showHealthCheck.value = false
+  showHybridMesh.value = false
+  highlightDecl.value = null
+}
+
+// Toggle a bottom-left tool panel. Re-clicking the open tool closes it;
+// opening one closes the other tools but PRESERVES the node/edge/group
+// selection (so the node stays activated behind the tool panel).
+function toggleTool(tool: 'global' | 'health' | 'hybrid') {
+  closeSidebar()
+  const wasOpen =
+    tool === 'global' ? showGlobalConfig.value : tool === 'health' ? showHealthCheck.value : showHybridMesh.value
+  showGlobalConfig.value = false
+  showHealthCheck.value = false
+  showHybridMesh.value = false
+  highlightDecl.value = null
+  if (wasOpen) return
+  if (tool === 'global') showGlobalConfig.value = true
+  else if (tool === 'health') showHealthCheck.value = true
+  else showHybridMesh.value = true
+}
+
+// Jump from an Edit panel into the Hybrid Mesh panel, highlighting the
+// declaration matching the given peer/connection.
+function onGotoHybrid(payload: { pub?: string; priv?: string }) {
   clearSelection()
-  showGlobalConfig.value = true
+  highlightDecl.value = { pub: payload.pub || '', priv: payload.priv || '' }
+  showHybridMesh.value = true
 }
 
 function selectGroup(name: string) {
+  closeSidebar()
   if (selectedGroup.value === name) {
     clearSelection()
   } else {
@@ -304,7 +377,16 @@ function selectGroup(name: string) {
   }
 }
 
+const anyToolOpen = () => showGlobalConfig.value || showHealthCheck.value || showHybridMesh.value
+
 function onNodeClick(nodeId: string) {
+  closeSidebar()
+  // Re-click the active node with no tool covering it → deselect (toggle off).
+  // If a tool panel is covering it, re-clicking reveals the node panel instead.
+  if (selectedPeer.value === nodeId && !anyToolOpen()) {
+    clearSelection()
+    return
+  }
   clearSelection()
   selectedPeer.value = nodeId
   const extra = graphData.value?.nodes?.find((n: any) => n.id === nodeId)?.data
@@ -312,11 +394,14 @@ function onNodeClick(nodeId: string) {
 }
 
 function onEdgeClick(edge: any) {
+  if (selectedEdge.value?.id === edge.id && !anyToolOpen()) {
+    clearSelection()
+    return
+  }
   clearSelection()
   selectedEdge.value = edge
 }
 
-// --- Context menu ---
 function onNodeRightClick(event: { x: number; y: number; nodeId: string }) {
   clearSelection()
   selectedPeer.value = event.nodeId
@@ -380,13 +465,12 @@ function onTraceResult(hops: { nodeId: string }[]) {
   traceHighlight.value = hops.map(h => h.nodeId)
 }
 
-// --- Selection modal (add/remove group membership, relay) ---
 const selectionModal = reactive({
   visible: false,
   title: '',
   itemType: 'group' as 'node' | 'group',
   items: [] as any[],
-  action: '' as 'add-to-group' | 'remove-from-group' | 'add-peer-to-group' | 'relay-for',
+  action: '' as 'add-to-group' | 'remove-from-group' | 'add-peer-to-group' | 'relay-for' | 'proxy-for',
 })
 
 function onAddToGroup() {
@@ -447,10 +531,13 @@ function onSelectionSelect(id: string) {
     // nodeId (the peer) declares it relays `id` (the selected node)
     // PUBLIC=nodeId (high), PRIVATE=id (low)
     draftStore.addRelay(nodeId, id)
+  } else if (selectionModal.action === 'proxy-for') {
+    // nodeId (the peer) declares it NAT-proxies `id` (the selected node)
+    // PUBLIC=nodeId (high), PRIVATE=id (low)
+    draftStore.addProxy(nodeId, id)
   }
 }
 
-// --- Relay for: open node selection to pick which node this peer routes ---
 function onRelayFor() {
   closeContextMenu()
   const nodeId = contextMenu.targetId
@@ -467,7 +554,22 @@ function onRelayFor() {
   selectionModal.action = 'relay-for'
 }
 
-// --- Connection actions ---
+function onProxyFor() {
+  closeContextMenu()
+  const nodeId = contextMenu.targetId
+  // Available: nodes that are not center, not self, and not already proxied by this node
+  const node = graphData.value?.nodes?.find((n: any) => n.id === nodeId)
+  const existingProxies = (node?.data?.proxies || []).map((r: any) => r.id)
+  const available = graphData.value?.nodes
+    ?.filter((n: any) => !n.data?.isCenter && n.id !== nodeId && !existingProxies.includes(n.id))
+    .map((n: any) => ({ id: n.id, name: n.data?.fileName || n.id.slice(0, 12), comment: n.data?.comments || '' }))
+  selectionModal.visible = true
+  selectionModal.title = 'Proxy for…'
+  selectionModal.itemType = 'node'
+  selectionModal.items = available || []
+  selectionModal.action = 'proxy-for'
+}
+
 function onSetGateway() {
   closeContextMenu()
   const edge = selectedEdge.value
@@ -491,7 +593,6 @@ function onSetDefault() {
   }
 }
 
-// --- Delete group from context menu ---
 function onContextMenuDeleteGroup() {
   closeContextMenu()
   const name = contextMenu.targetId
@@ -501,7 +602,6 @@ function onContextMenuDeleteGroup() {
   }
 }
 
-// --- Create group ---
 function createGroup() {
   const name = newGroupName.value.trim()
   createGroupError.value = ''
@@ -534,12 +634,12 @@ function saveGlobalConfig(data: any) {
   showGlobalConfig.value = false
 }
 
-// Health check conflict count for sidebar badge
+// Health check badge: quick (static) error count for the sidebar.
 const conflictCount = computed(() => {
   if (!graphData.value) return 0
   try {
-    const m = new EasyWGSyncModel(graphData.value)
-    return m.healthCheck().conflicts.length
+    const q = new EasyWGSyncModel(graphData.value).quickCheck()
+    return q.gatewayUniqueness.length + q.relayUniqueness.length + q.connectionErrors.length
   } catch { return 0 }
 })
 
@@ -548,7 +648,6 @@ function onPanelSaved() {
   clearSelection()
 }
 
-// --- Commit / discard the whole draft ---
 async function saveAll() {
   await draftStore.commit()
   previewOpen.value = false

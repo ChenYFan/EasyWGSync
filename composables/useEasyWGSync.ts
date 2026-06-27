@@ -1,6 +1,11 @@
 // EasyWGSync data model class
 // Centralizes all topology data access and perspective-based lookups
 
+import { TopologyModel } from '~/composables/useTopology'
+import { classifyIP } from '~/composables/useWgConfigParser'
+import { useDraft } from '~/composables/useDraft'
+import type { GraphBase } from '~/composables/useGraphDerive'
+
 export class EasyWGSyncModel {
   nodes: any[]
   edges: any[]
@@ -12,6 +17,16 @@ export class EasyWGSyncModel {
     this.edges = graphData?.edges || []
     this.meshGroups = graphData?.meshGroups || {}
     this.config = config || graphData?.config || null
+  }
+
+  // TopologyModel needs the real GraphBase (interfaceInfo/globalDefaults/
+  // onlineEndpoints are network-wide values fetched once from wgdashboard and
+  // held in the global useDraft().base — NOT recoverable from graphData, which
+  // only carries derived nodes/edges). Reuse that global base instead of
+  // rebuilding a lossy one from graphData.
+  private getTopologyModel(): TopologyModel {
+    const { base, draft } = useDraft()
+    return new TopologyModel(base.value, draft.value)
   }
 
   // === Node lookups ===
@@ -34,7 +49,6 @@ export class EasyWGSyncModel {
 
   // === IP lookups (perspective-based) ===
 
-  // What IP does `fromId` see `toId` as?
   // Priority: P2P_CONFIG AllowedIPs (per-edge override) > toId's GLOBAL ALLOWED_IPS
   // (declared to all peers) > toId's real address
   getAllowedIPsFrom(fromId: string, toId: string): string[] {
@@ -55,7 +69,6 @@ export class EasyWGSyncModel {
     return addr ? addr.split(',').map((s: string) => s.trim()) : []
   }
 
-  // Get the display IP string from perspective of `fromId` looking at `toId`
   getDisplayIPFrom(fromId: string, toId: string): string {
     const ips = this.getAllowedIPsFrom(fromId, toId)
     if (ips.length === 0) return ''
@@ -65,20 +78,21 @@ export class EasyWGSyncModel {
     return ips[0]
   }
 
-  // Get real address of a node (not perspective-based)
+  // Get real address of a node (not perspective-based). Validates each token
+  // via classifyIP so an embedded-IPv4 v6 tail isn't misclassified as v4.
+  // Returns the CIDR form (with /prefix) as stored in the address field.
   getRealIPv4(id: string): string {
     const addr = this.getNode(id)?.data?.address || ''
-    return addr.split(',').map((s: string) => s.trim()).find((s: string) => s.includes('.')) || ''
+    return addr.split(',').map((s: string) => s.trim()).find((s: string) => classifyIP(s) === 'v4') || ''
   }
 
   getRealIPv6(id: string): string {
     const addr = this.getNode(id)?.data?.address || ''
-    return addr.split(',').map((s: string) => s.trim()).find((s: string) => s.includes(':')) || ''
+    return addr.split(',').map((s: string) => s.trim()).find((s: string) => classifyIP(s) === 'v6') || ''
   }
 
   // === Endpoint lookups ===
 
-  // What endpoint does `fromId` use to reach `toId`?
   getEndpointFrom(fromId: string, toId: string): string {
     const edge = this.edges.find(
       (e: any) => e.source === fromId && e.target === toId
@@ -143,7 +157,6 @@ export class EasyWGSyncModel {
 
   // === Peer info for display ===
 
-  // Build display info for a peer from a given perspective node
   getPeerDisplayInfo(peerId: string, fromPerspective?: string) {
     const node = this.getNode(peerId)
     const ipv4 = fromPerspective
@@ -157,12 +170,13 @@ export class EasyWGSyncModel {
       comment: this.getNodeComment(peerId),
       ipv4,
       isCenter: this.isCenter(peerId),
+      // CENTER reuses the virtual-group card STYLING only (distinct chip). This
+      // is purely cosmetic — do NOT read isVirtual to infer routability/editability.
       isVirtual: this.isCenter(peerId),
       endpoint: fromPerspective ? this.getEndpointFrom(fromPerspective, peerId) : (node?.data?.endpoint || ''),
     }
   }
 
-  // Build display info for all direct peers of a node
   getDirectPeersInfo(nodeId: string) {
     const peerIds = this.getDirectPeers(nodeId)
     return peerIds
@@ -174,7 +188,6 @@ export class EasyWGSyncModel {
       })
   }
 
-  // Build display info for group members
   getGroupMembersInfo(groupName: string) {
     const members = this.meshGroups[groupName]?.members || []
     return members
@@ -205,405 +218,91 @@ export class EasyWGSyncModel {
     }))
   }
 
-  // === Relay / Gateway identification ===
-
-  // Get the center network segment (v4 /24, v6 /80) derived from node /32 addresses.
-  getCenterSegments(): { v4: string | null; v6: string | null } {
-    let v4: string | null = null
-    let v6: string | null = null
-    const toV4Net = (cidr: string): string | null => {
-      const m = cidr.match(/^([\d.]+)\/\d+$/)
-      if (!m) return null
-      const parts = m[1].split('.').map(Number)
-      const ip = (parts[0] << 24 >>> 0) | (parts[1] << 16 >>> 0) | (parts[2] << 8 >>> 0) | parts[3]
-      const mask = (~0 << 8) >>> 0 // /24
-      const net = (ip & mask) >>> 0
-      return `${(net >>> 24) & 255}.${(net >>> 16) & 255}.${(net >>> 8) & 255}.${net & 255}/24`
-    }
-    for (const n of this.nodes) {
-      const addr = n.data?.address || ''
-      for (const ip of addr.split(',').map((s: string) => s.trim())) {
-        if (!v4 && ip.includes('.')) v4 = toV4Net(ip)
-        if (!v6 && ip.includes(':')) v6 = ip.replace(/\/\d+$/, '/80')
-      }
-      if (v4 && v6) break
-    }
-    return { v4, v6 }
-  }
-
   // === Config health check ===
 
-  // Detect IP declaration conflicts: multiple nodes' GLOBAL ALLOWED_IPS
-  // declare the same IP in a way that's genuinely ambiguous for routing.
-  //
-  // A relay chain (A relay B relay C) legitimately makes C's IP appear in both
-  // A's and B's GLOBAL ALLOWED_IPS (transitive closure) — this is NOT a conflict.
-  // A conflict only exists when two claimers are NOT on the same relay chain
-  // (neither is a relay-ancestor of the other), so routing to that IP is truly
-  // ambiguous and WireGuard would pick by [Peer] order.
-  getIpConflicts(): Array<{ ip: string; claimers: Array<{ id: string; name: string }> }> {
-    if (!this.config?.EXTRA_CONFIG) return []
-
-    // Build IP -> owner (from node addresses)
-    const ipOwner = new Map<string, string>()
-    for (const n of this.nodes) {
-      const addr = n.data?.address || ''
-      for (const ip of addr.split(',').map((s: string) => s.trim())) {
-        if (ip.includes('.')) ipOwner.set(ip.replace(/\/\d+$/, ''), n.id)
-      }
-    }
-
-    // Build relay reachability from HYBRID_MESH: relayReaches[X] = set of nodes X
-    // can reach via relay (transitive). A relay B → A reaches B.
-    const relayReaches = this.computeRelayReachability()
-
-    // Two claimers are "on the same chain" if one relay-reaches the other.
-    const sameChain = (a: string, b: string): boolean => {
-      if (a === b) return true
-      return (relayReaches.get(a)?.has(b) ?? false) || (relayReaches.get(b)?.has(a) ?? false)
-    }
-
-    // Build IP -> list of nodes that GLOBAL-declare it
-    const ipClaimers = new Map<string, Array<{ id: string; name: string }>>()
-    for (const [aPubkey, extra] of Object.entries(this.config.EXTRA_CONFIG)) {
-      const globalIPs = (extra as any)?.ALLOWED_IPS || []
-      for (const cidr of globalIPs) {
-        const bareIp = cidr.replace(/\/\d+$/, '')
-        if (!bareIp.includes('.')) continue
-        const owner = ipOwner.get(bareIp)
-        if (!owner || owner === aPubkey) continue // own IP or unknown, skip
-        if (!ipClaimers.has(bareIp)) ipClaimers.set(bareIp, [])
-        const claimers = ipClaimers.get(bareIp)!
-        if (!claimers.some(c => c.id === aPubkey)) {
-          claimers.push({ id: aPubkey, name: this.getNodeName(aPubkey) })
-        }
-      }
-    }
-
-    const conflicts: Array<{ ip: string; claimers: Array<{ id: string; name: string }> }> = []
-    for (const [ip, claimers] of ipClaimers) {
-      if (claimers.length <= 1) continue
-
-      // Legitimate if all claimers are pairwise on the same relay chain
-      // (totally ordered by relay-reachability). A real conflict needs at least
-      // one pair of claimers that are NOT on the same chain.
-      let hasConflict = false
-      for (let i = 0; i < claimers.length && !hasConflict; i++) {
-        for (let j = i + 1; j < claimers.length; j++) {
-          if (!sameChain(claimers[i].id, claimers[j].id)) {
-            hasConflict = true
-            break
-          }
-        }
-      }
-      if (!hasConflict) continue // relay chain — legitimate, not a conflict
-
-      const ownerName = this.getNodeName(ipOwner.get(ip) || '')
-      conflicts.push({ ip, claimers: [{ id: ipOwner.get(ip) || '', name: ownerName }, ...claimers] })
-    }
-    return conflicts
-  }
-
-  // Build transitive relay reachability from HYBRID_MESH.DECLARATIONS.RELAY +
-  // flatten ROAMING (which implies relay). relayReaches[X] = nodes X reaches.
-  private computeRelayReachability(): Map<string, Set<string>> {
-    const adj = new Map<string, string[]>()
-    const hm = this.config?.HYBRID_MESH
-    const addEdge = (pub: string, priv: string) => {
-      if (!adj.has(pub)) adj.set(pub, [])
-      adj.get(pub)!.push(priv)
-    }
-    for (const d of (hm?.DECLARATIONS?.RELAY || [])) {
-      if (d.ENABLED !== false) addEdge(d.PUBLIC_PEER, d.PRIVATE_PEER)
-    }
-    for (const r of (hm?.ROAMING || [])) {
-      if (r.ENABLED !== false && r.TYPE === 'flatten') addEdge(r.PUBLIC_PEER, r.PRIVATE_PEER)
-    }
-
-    const reaches = new Map<string, Set<string>>()
-    const dfs = (node: string, acc: Set<string>, seen: Set<string>) => {
-      for (const next of (adj.get(node) || [])) {
-        if (seen.has(next)) continue
-        seen.add(next)
-        acc.add(next)
-        dfs(next, acc, seen)
-      }
-    }
-    for (const start of adj.keys()) {
-      const acc = new Set<string>()
-      dfs(start, acc, new Set([start]))
-      reaches.set(start, acc)
-    }
-    return reaches
-  }
-
-  // Full health check: all issues combined
-  healthCheck(): { conflicts: Array<{ ip: string; claimers: Array<{ id: string; name: string }> }> } {
-    return {
-      conflicts: this.getIpConflicts(),
-    }
-  }
-
-  // Relay identification: node A is a Relay of B if A's GLOBAL ALLOWED_IPS
-  // declares an IP that belongs to B (and not to A itself).
-  // Returns map: relayNodeId -> [relayedNodeIds]
-  getRelays(): Record<string, string[]> {
-    if (!this.config?.EXTRA_CONFIG) return {}
-    const result: Record<string, string[]> = {}
-
-    // Build IP -> owner map (from node addresses, strip CIDR)
-    const ipOwner = new Map<string, string>()
-    for (const n of this.nodes) {
-      const owner = n.id
-      const addr = n.data?.address || ''
-      for (const ip of addr.split(',').map((s: string) => s.trim())) {
-        if (ip.includes('.')) {
-          ipOwner.set(ip.replace(/\/\d+$/, ''), owner)
-        }
-      }
-    }
-
-    for (const [aPubkey, extra] of Object.entries(this.config.EXTRA_CONFIG)) {
-      const globalIPs = (extra as any)?.ALLOWED_IPS || []
-      for (const cidr of globalIPs) {
-        const bareIp = cidr.replace(/\/\d+$/, '')
-        if (!bareIp.includes('.')) continue
-        const owner = ipOwner.get(bareIp)
-        // Owner exists, and it's not A itself => A relays owner
-        if (owner && owner !== aPubkey) {
-          if (!result[aPubkey]) result[aPubkey] = []
-          if (!result[aPubkey].includes(owner)) result[aPubkey].push(owner)
-        }
-      }
-    }
-    return result
-  }
-
-  // Gateway identification: A is B's Gateway if B->A connection's ALLOWED_IPS
-  // contains the whole domain (v4 /24 or v6 /80).
-  // Returns list of { from: B, gateway: A }
-  getGateways(): Array<{ from: string; gateway: string }> {
-    const { v4, v6 } = this.getCenterSegments()
-    const result: Array<{ from: string; gateway: string }> = []
-
-    for (const edge of this.edges) {
-      const ips = edge.data?.p2pAllowedIPs || []
-      // B->A: edge.source=B, edge.target=A. B treats A as gateway.
-      const isWholeDomain = ips.some((ip: string) => ip === v4 || ip === v6)
-      if (isWholeDomain) {
-        result.push({ from: edge.source, gateway: edge.target })
-      }
-    }
-    return result
-  }
-
-  // === Mock TraceRoute ===
-
-  // Find the node that owns a given IP (matches against node addresses)
-  findNodeByIp(ip: string): string | null {
-    const bare = ip.replace(/\/\d+$/, '')
-    for (const n of this.nodes) {
-      const addr = n.data?.address || ''
-      const ips = addr.split(',').map((s: string) => s.trim())
-      for (const nodeIp of ips) {
-        if (nodeIp.includes('.') && this.ipv4Matches(bare, nodeIp)) {
-          return n.id
-        }
-      }
-    }
-    return null
-  }
-
-  // Parse CIDR to { ip: number (for v4) or bigint (for v6), prefix: number }
-  private parseIPv4(cidr: string): { ip: number; prefix: number } | null {
-    const match = cidr.match(/^(\d+\.\d+\.\d+\.\d+)\/(\d+)$/)
-    if (!match) {
-      // Try bare IP
-      const bareMatch = cidr.match(/^(\d+\.\d+\.\d+\.\d+)$/)
-      if (!bareMatch) return null
-      const parts = bareMatch[1].split('.').map(Number)
-      return { ip: (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3], prefix: 32 }
-    }
-    const parts = match[1].split('.').map(Number)
-    return { ip: (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3], prefix: parseInt(match[2]) }
-  }
-
-  private ipv4Matches(targetIp: string, cidr: string): boolean {
-    const target = this.parseIPv4(targetIp + '/32')
-    const network = this.parseIPv4(cidr)
-    if (!target || !network) return false
-    const mask = network.prefix === 0 ? 0 : (~0 << (32 - network.prefix)) >>> 0
-    return ((target.ip >>> 0) & mask) === ((network.ip >>> 0) & mask)
-  }
-
-  private getCIDRPrefix(cidr: string): number {
-    const match = cidr.match(/\/(\d+)$/)
-    return match ? parseInt(match[1]) : 32
-  }
-
-  // Determine if a target IP is covered by any of the allowed IPs
-  private findBestRoute(
-    fromNodeId: string,
-    targetIp: string
-  ): { nextHop: string; matchedCIDR: string; prefix: number } | null {
-    const peers = this.getDirectPeers(fromNodeId)
-    let bestMatch: { nextHop: string; matchedCIDR: string; prefix: number } | null = null
-
-    for (const peerId of peers) {
-      const allowedIPs = this.getAllowedIPsFrom(fromNodeId, peerId)
-      for (const cidr of allowedIPs) {
-        // Skip non-IPv4 for now (simple implementation)
-        if (!cidr.includes('.')) continue
-        if (this.ipv4Matches(targetIp, cidr)) {
-          const prefix = this.getCIDRPrefix(cidr)
-          if (!bestMatch || prefix > bestMatch.prefix) {
-            bestMatch = { nextHop: peerId, matchedCIDR: cidr, prefix }
-          }
-        }
-      }
-    }
-
-    return bestMatch
-  }
-
-  // Forward-only trace (no return path check). Used internally by mockTraceRoute.
-  private traceForward(
-    sourceId: string,
-    targetIp: string,
-    maxHops = 16
-  ): { hops: TraceHop[]; error?: string } {
-    const hops: TraceHop[] = []
-    const visited = new Set<string>()
-    let currentId = sourceId
-
-    hops.push({
-      nodeId: currentId,
-      nodeName: this.getNodeName(currentId),
-      matchedCIDR: null,
-      isSource: true,
-      isDestination: false,
-    })
-
-    for (let i = 0; i < maxHops; i++) {
-      const currentNode = this.getNode(currentId)
-      const currentAddr = currentNode?.data?.address || ''
-      const currentIPs = currentAddr.split(',').map((s: string) => s.trim())
-
-      for (const ip of currentIPs) {
-        if (ip.includes('.') && this.ipv4Matches(targetIp, ip)) {
-          hops[hops.length - 1].isDestination = true
-          return { hops }
-        }
-      }
-
-      if (visited.has(currentId)) {
-        return { hops, error: `路由环路：${this.getNodeName(currentId)} 被重复访问` }
-      }
-      visited.add(currentId)
-
-      if (this.isCenter(currentId)) {
-        const targetNode = this.nodes.find(n => {
-          const addr = n.data?.address || ''
-          return addr.split(',').map((s: string) => s.trim()).some((ip: string) =>
-            ip.includes('.') && this.ipv4Matches(targetIp, ip)
-          )
-        })
-        if (targetNode) {
-          hops.push({
-            nodeId: targetNode.id,
-            nodeName: this.getNodeName(targetNode.id),
-            matchedCIDR: 'CENTER direct',
-            isSource: false,
-            isDestination: true,
-          })
-          return { hops }
-        }
-        return { hops, error: `中心节点无法找到目标 ${targetIp} 的所有者` }
-      }
-
-      const route = this.findBestRoute(currentId, targetIp)
-      if (!route) {
-        return { hops, error: `路由不可达：${this.getNodeName(currentId)} 没有覆盖 ${targetIp} 的路由` }
-      }
-
-      currentId = route.nextHop
-      hops.push({
-        nodeId: currentId,
-        nodeName: this.getNodeName(currentId),
-        matchedCIDR: route.matchedCIDR,
-        isSource: false,
-        isDestination: false,
-      })
-    }
-
-    return { hops, error: `超过最大跳数 (${maxHops})` }
-  }
-
-  // Single-direction trace (public). Resolves one path from source to target IP.
-  // Used by the panel to run forward + return traces independently.
-  trace(
-    sourceId: string,
-    targetIp: string,
-    maxHops = 16
-  ): { hops: TraceHop[]; error?: string } {
-    return this.traceForward(sourceId, targetIp, maxHops)
-  }
-
-  // Run mock traceroute: forward trace to target, then return trace back to source IP.
-  // Each direction is a complete independent trace; results are joined for display.
-  // Also reports whether the two paths are symmetric (return == forward reversed).
-  mockTraceRoute(
-    sourceId: string,
-    targetIp: string,
-    maxHops = 16
-  ): {
-    forward: { hops: TraceHop[]; error?: string }
-    return?: { hops: TraceHop[]; error?: string }
-    returnError?: string
-    symmetric: boolean
+  // QUICK (static) health check — runs on every draft change. Validates only the
+  // high-level abstraction layer + connection semantics (cheap, no rendering).
+  // The duplicate-AllowedIPs / reachability checks live in the DYNAMIC full check
+  // (composables/useHealthFull.ts), which renders each node's real config.
+  // - gatewayUniqueness: a node with more than one active gateway (error).
+  // - relayUniqueness: a node DIRECTLY relayed by more than one node (error).
+  // - connectionErrors: declarations whose pair has NO relationship at all (error).
+  // - connectionWarnings: declarations whose pair only exists in a DISABLED group (warning).
+  quickCheck(): {
+    gatewayUniqueness: Array<{ node: string; name: string; exits: Array<{ id: string; name: string }> }>
+    relayUniqueness: Array<{ node: string; name: string; relayers: Array<{ id: string; name: string }> }>
+    connectionErrors: Array<{ kind: string; a: string; aName: string; b: string; bName: string }>
+    connectionWarnings: Array<{ kind: string; a: string; aName: string; b: string; bName: string }>
   } {
-    // Forward trace
-    const fwd = this.traceForward(sourceId, targetIp, maxHops)
-    if (fwd.error) {
-      return { forward: fwd, symmetric: false }
+    const topo = this.getTopologyModel()
+
+    // --- Gateway uniqueness: each node may have at most one gateway exit. ---
+    const gatewayUniqueness: Array<{ node: string; name: string; exits: Array<{ id: string; name: string }> }> = []
+    const checked = new Set<string>()
+    for (const gw of topo.getGatewayDeclarations()) {
+      if (checked.has(gw.PRIVATE_PEER)) continue
+      checked.add(gw.PRIVATE_PEER)
+      const exits = topo.getGatewayExitsOf(gw.PRIVATE_PEER)
+      if (exits.length > 1) {
+        gatewayUniqueness.push({
+          node: gw.PRIVATE_PEER,
+          name: this.getNodeName(gw.PRIVATE_PEER),
+          exits: exits.map(id => ({ id, name: this.getNodeName(id) })),
+        })
+      }
     }
 
-    // Resolve source node's IPv4 for the return trace target (strip CIDR mask)
-    const srcNode = this.getNode(sourceId)
-    const srcAddr = srcNode?.data?.address || ''
-    const srcIpv4Cidr = srcAddr.split(',').map((s: string) => s.trim()).find((s: string) => s.includes('.'))
-    const srcIpv4 = srcIpv4Cidr ? srcIpv4Cidr.replace(/\/\d+$/, '') : ''
-
-    if (!srcIpv4) {
-      return { forward: fwd, returnError: '无法验证回程：源节点无 IPv4 地址', symmetric: false }
+    // --- Relay uniqueness: each node may be DIRECTLY relayed by at most one
+    // node. Transitive relay (chain A→B→C) is legitimate, NOT a violation;
+    // only count direct relayers (nodes that declare X in a RELAY/flatten-Roaming). ---
+    const relayUniqueness: Array<{ node: string; name: string; relayers: Array<{ id: string; name: string }> }> = []
+    const hm = this.config?.HYBRID_MESH
+    const relayedNodes = new Set<string>()
+    const collectRelayed = (list: any[]) => {
+      for (const d of (list || [])) {
+        if (d.ENABLED !== false) relayedNodes.add(d.PRIVATE_PEER)
+      }
+    }
+    collectRelayed(hm?.DECLARATIONS?.RELAY)
+    collectRelayed((hm?.ROAMING || []).filter((r: any) => r.TYPE === 'flatten'))
+    for (const node of relayedNodes) {
+      const relayers = topo.getDirectRelayersOf(node)
+      if (relayers.length > 1) {
+        relayUniqueness.push({
+          node,
+          name: this.getNodeName(node),
+          relayers: relayers.map(id => ({ id, name: this.getNodeName(id) })),
+        })
+      }
     }
 
-    // Return trace from destination back to source IP
-    const destNode = fwd.hops[fwd.hops.length - 1]
-    const ret = this.traceForward(destNode.nodeId, srcIpv4, maxHops)
-
-    if (ret.error) {
-      return { forward: fwd, returnError: `回程路由不通：${ret.error}`, symmetric: false }
+    // --- Missing connections: declarations whose pair lacks an ENABLED connection.
+    // Split into errors ('none' — no relationship at all, declaration cannot apply)
+    // and warnings ('disabled' — relationship exists in a disabled group). ---
+    const connectionErrors: Array<{ kind: string; a: string; aName: string; b: string; bName: string }> = []
+    const connectionWarnings: Array<{ kind: string; a: string; aName: string; b: string; bName: string }> = []
+    const checkDecl = (kind: string, list: any[], pubKey: 'PUBLIC_PEER', privKey: 'PRIVATE_PEER') => {
+      for (const d of (list || [])) {
+        if (d.ENABLED === false) continue
+        const a = d[pubKey], b = d[privKey]
+        const cls = topo.classifyConnection(a, b)
+        if (cls === 'none') {
+          connectionErrors.push({ kind, a, aName: this.getNodeName(a), b, bName: this.getNodeName(b) })
+        } else if (cls === 'disabled') {
+          connectionWarnings.push({ kind, a, aName: this.getNodeName(a), b, bName: this.getNodeName(b) })
+        }
+      }
     }
+    checkDecl('GATEWAY', hm?.DECLARATIONS?.GATEWAY, 'PUBLIC_PEER', 'PRIVATE_PEER')
+    checkDecl('RELAY', hm?.DECLARATIONS?.RELAY, 'PUBLIC_PEER', 'PRIVATE_PEER')
+    checkDecl('PROXY', hm?.DECLARATIONS?.PROXY, 'PUBLIC_PEER', 'PRIVATE_PEER')
+    checkDecl('ROAMING', hm?.ROAMING, 'PUBLIC_PEER', 'PRIVATE_PEER')
 
-    const lastReturnHop = ret.hops[ret.hops.length - 1]
-    if (!lastReturnHop.isDestination) {
-      return { forward: fwd, returnError: '回程路由未到达源节点', symmetric: false }
+    return {
+      gatewayUniqueness,
+      relayUniqueness,
+      connectionErrors,
+      connectionWarnings,
     }
-
-    // Symmetry check: return path should equal forward path reversed
-    const fwdIds = fwd.hops.map(h => h.nodeId)
-    const retIds = ret.hops.map(h => h.nodeId)
-    const symmetric = JSON.stringify(fwdIds.reverse()) === JSON.stringify(retIds)
-
-    return { forward: fwd, return: ret, symmetric }
   }
-}
-
-export interface TraceHop {
-  nodeId: string
-  nodeName: string
-  matchedCIDR: string | null
-  isSource: boolean
-  isDestination: boolean
 }
