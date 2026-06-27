@@ -1,5 +1,12 @@
 import { verifyToken } from '~/server/utils/jwks'
 
+defineRouteMeta({ openAPI: {
+    "summary": "获取当前会话",
+    "description": "返回当前登录状态与用户信息。未配置 Casdoor 时默认视为已登录的 dev 用户。",
+    "tags": [
+      "auth"
+    ]
+  } })
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig()
 

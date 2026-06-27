@@ -38,10 +38,79 @@ uninstall_ewctl() {
     echo "ewctl 已卸载。"
 }
 
+update_ewctl() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "配置文件不存在，无法获取服务器地址。请先配置 (ewctl 1)。"
+        exit 1
+    fi
+    # Server address is the 2nd config param (ip:port). Strip any scheme/path.
+    local CFG_PARAMS=($(<"$CONFIG_FILE"))
+    local SERVER="${CFG_PARAMS[1]}"
+    SERVER="${SERVER#https://}"
+    SERVER="${SERVER#http://}"
+    SERVER="${SERVER%%/*}"
+    local URL="https://${SERVER}/api/ewctl"
+    local TMP_FILE="/tmp/ewctl.sh"
+    echo "正在从 ${URL} 下载最新 ewctl 到 ${TMP_FILE}..."
+    local HTTP_STATUS
+    HTTP_STATUS=$(curl -o "$TMP_FILE" -s -w "%{http_code}\n" "${URL}")
+    if [[ "${HTTP_STATUS}" -ne 200 || ! -s "$TMP_FILE" ]]; then
+        echo "错误: 无法下载 ewctl (HTTP ${HTTP_STATUS})。"
+        rm -f "$TMP_FILE"
+        exit 1
+    fi
+    cp -f "$TMP_FILE" "$EWCTL_PATH"
+    chmod +x "$EWCTL_PATH"
+    rm -f "$TMP_FILE"
+    echo "ewctl 已更新到 $EWCTL_PATH。"
+}
+
 register_crontab() {
     (crontab -l 2>/dev/null; echo "*/2 * * * * $EWCTL_PATH 2") | crontab -
     echo "已注册定时任务，每2分钟运行一次 ewctl。"
 }
+sync_proxy() {
+    local IFACE="$1" CONF="$2"
+    # Target proxy list from the .conf JSON comment block.
+    local TARGET_JSON
+    TARGET_JSON=$(awk "/#===EASYWGSYNC_PROXY_START===#/{f=1;next}/#===EASYWGSYNC_PROXY_END===#/{f=0}f" "$CONF" | grep "^#" | sed "s/^#//")
+    local TARGET_IPS=()
+    if [[ -n "$TARGET_JSON" ]]; then
+        while IFS= read -r ip; do [[ -n "$ip" ]] && TARGET_IPS+=("$ip"); done < <(echo "$TARGET_JSON" | grep -oE ""proxied":\[[^]]*\]" | grep -oE "[0-9a-fA-F:.]+/[0-9]+")
+    fi
+
+    # Current proxy list from live iptables (stateless — no local state file).
+    local CUR_IPS=()
+    while IFS= read -r rule; do
+        local ip=$(echo "$rule" | grep -oE "\-s [0-9a-fA-F:.]+/[0-9]+" | awk "{print $2}")
+        [[ -n "$ip" ]] && CUR_IPS+=("$ip")
+    done < <(iptables -t nat -S POSTROUTING 2>/dev/null | grep -E -- "-o ${IFACE} " | grep -E -- "-j MASQUERADE")
+    while IFS= read -r rule; do
+        local ip=$(echo "$rule" | grep -oE "\-s [0-9a-fA-F:.]+/[0-9]+" | awk "{print $2}")
+        [[ -n "$ip" ]] && CUR_IPS+=("$ip")
+    done < <(ip6tables -t nat -S POSTROUTING 2>/dev/null | grep -E -- "-o ${IFACE} " | grep -E -- "-j MASQUERADE")
+
+    # Diff: add new (-A), remove gone (-D). v4 -> iptables, v6 -> ip6tables.
+    for ip in "${TARGET_IPS[@]}"; do
+        local found=0
+        for c in "${CUR_IPS[@]}"; do [[ "$c" == "$ip" ]] && found=1 && break; done
+        if [[ $found -eq 0 ]]; then
+            local cmd=$(echo "$ip" | grep -q ":" && echo ip6tables || echo iptables)
+            $cmd -t nat -A POSTROUTING -s "$ip" -o "${IFACE}" -j MASQUERADE
+            echo "proxy +$ip"
+        fi
+    done
+    for ip in "${CUR_IPS[@]}"; do
+        local found=0
+        for t in "${TARGET_IPS[@]}"; do [[ "$t" == "$ip" ]] && found=1 && break; done
+        if [[ $found -eq 0 ]]; then
+            local cmd=$(echo "$ip" | grep -q ":" && echo ip6tables || echo iptables)
+            $cmd -t nat -D POSTROUTING -s "$ip" -o "${IFACE}" -j MASQUERADE 2>/dev/null
+            echo "proxy -$ip"
+        fi
+    done
+}
+
 EasyWireGuardSync() {
     local CONFIG_PARAMS=("$@")
     echo "执行 EasyWireGuardSync 主函数，参数: ${CONFIG_PARAMS[*]}"
@@ -66,6 +135,7 @@ EasyWireGuardSync() {
     if ip link show "${WG_INTERFACE}" &> /dev/null; then
         echo "接口 ${WG_INTERFACE} 已存在，正在更新配置..."
         wg syncconf ${WG_INTERFACE} <(wg-quick strip ${CONFIG_DIR})
+        sync_proxy "${WG_INTERFACE}" "${CONFIG_DIR}"
     else
         echo "接口 ${WG_INTERFACE} 不存在，正在创建..."
         wg-quick up "${WG_INTERFACE}"
@@ -91,20 +161,23 @@ case $ACTION in
         register_crontab
         ;;
     4)
-        EasyWireGuardSync "$@" 
+        EasyWireGuardSync "$@"
+        ;;
+    5)
+        update_ewctl
         ;;
     9)
         uninstall_ewctl
         ;;
 
     *)
-        echo "==========================================
-███████ ██     ██ ███████ ██   ██  ██████
-██      ██     ██ ██      ██   ██ ██  ████
-█████   ██  █  ██ ███████ ███████ ██ ██ ██
-██      ██ ███ ██      ██ ██   ██ ████  ██
-███████  ███ ███  ███████ ██   ██  ██████   
-==========================================
+        echo "
+  ███████╗██╗    ██╗ ██████╗ ███████╗██╗   ██╗███╗   ██╗ ██████╗
+  ██╔════╝██║    ██║██╔════╝ ██╔════╝╚██╗ ██╔╝████╗  ██║██╔════╝
+  █████╗  ██║ █╗ ██║██║  ███╗███████╗ ╚████╔╝ ██╔██╗ ██║██║     
+  ██╔══╝  ██║███╗██║██║   ██║╚════██║  ╚██╔╝  ██║╚██╗██║██║     
+  ███████╗╚███╔███╔╝╚██████╔╝███████║   ██║   ██║ ╚████║╚██████╗
+  ╚══════╝ ╚══╝╚══╝  ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═══╝ ╚═════╝
 "
         echo "欢迎使用 EasyWireGuardSync 客户端脚本！"
         echo "请使用以下命令进行操作："
@@ -113,6 +186,7 @@ case $ACTION in
         echo "运行: $0 2"
         echo "注册定时任务: $0 3"
         echo "直接运行主函数: $0 4 [配置参数]"
+        echo "更新: $0 5"
         echo "卸载: $0 9"
         exit 0
         ;;

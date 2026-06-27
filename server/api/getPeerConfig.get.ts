@@ -4,6 +4,13 @@ import { createLogger } from '~/server/utils/logger'
 
 const log = createLogger('API:getPeerConfig')
 
+defineRouteMeta({ openAPI: {
+    "summary": "下载节点配置",
+    "description": "按节点名返回该节点的 WireGuard 配置文本。query 传 secret 鉴权、peername 指定节点。",
+    "tags": [
+      "client"
+    ]
+  } })
 export default defineEventHandler(async (event) => {
   const query = getQuery(event)
   const secret = query.secret as string | undefined

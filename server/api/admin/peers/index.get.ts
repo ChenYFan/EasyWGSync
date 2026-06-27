@@ -2,6 +2,14 @@ import { configService } from '~/server/services/config-service'
 import { fetchAllPeers } from '~/server/services/wg-dashboard'
 import { getShowEndpoints } from '~/server/services/wireguard'
 
+defineRouteMeta({ openAPI: {
+    "summary": "获取节点列表",
+    "description": "列出全部节点公钥与地址及在线端点，并返回已保存的覆盖配置与 mesh 组。需要管理员登录。",
+    "tags": [
+      "admin",
+      "peers"
+    ]
+  } })
 export default defineEventHandler(async () => {
   const config = useRuntimeConfig()
   const syncConfig = await configService.getAll()

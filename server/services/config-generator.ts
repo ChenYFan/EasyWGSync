@@ -3,7 +3,7 @@ import { fetchAllPeers, fetchRawConfig, fetchGlobalDefaults, fetchInterfaceInfo 
 import { getShowEndpoints, derivePubKey } from './wireguard'
 import { parsePeerConf, buildDefaultPeerConfig } from './wg-conf-parser'
 import { createLogger } from '../utils/logger'
-import { renderConfig } from '~/composables/useRenderModel'
+import { renderConfig, buildHistories } from '~/composables/useRenderModel'
 import type { SyncConfig } from '~/types'
 import type { GraphBase } from '~/composables/useGraphDerive'
 
@@ -59,8 +59,10 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
   }
 
   // Render the draft into concrete EXTRA_CONFIG values — ONE render path
-  // (buildHistories + converge), shared with the frontend graph.
-  const env = renderConfig(base, rawConfig)
+  // (buildHistories + converge), shared with the frontend graph. Also keep the
+  // model to surface the proxy list (JSON comment block for ewctl).
+  const model = buildHistories(base, rawConfig)
+  const env = renderConfig(base, rawConfig, model)
 
   const peerData = wgPeers.find(p => p.fileName === peerName)
   if (!peerData?.file) return ''
@@ -302,5 +304,17 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
     }
   }
 
-  return result + '\n# ===EasyWGSync托管，P2P配置结束=== #\n'
+  result += '\n# ===EasyWGSync托管，P2P配置结束=== #\n'
+
+  // Append a JSON comment block with this peer's proxy list (the source IPs it
+  // MASQUERADEs). ewctl reads this to diff against live iptables and apply
+  // incremental -A/-D without parsing PostUp scripts or tearing down the link.
+  // wg-quick ignores '#' comment lines, so this never affects WireGuard itself.
+  const proxied = model.proxyLists[PubKey] || []
+  if (proxied.length) {
+    const json = JSON.stringify({ proxied })
+    result += `\n#===EASYWGSYNC_PROXY_START===#\n#${json}\n#===EASYWGSYNC_PROXY_END===#\n`
+  }
+
+  return result
 }

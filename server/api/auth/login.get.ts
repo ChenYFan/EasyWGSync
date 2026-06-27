@@ -4,6 +4,13 @@ import { resolveRedirectUri } from '~/server/utils/redirect-uri'
 
 const log = createLogger('Auth:OIDC')
 
+defineRouteMeta({ openAPI: {
+    "summary": "跳转到登录",
+    "description": "重定向到 Casdoor 进行登录。配置 Casdoor 后可用。",
+    "tags": [
+      "auth"
+    ]
+  } })
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig()
   const { client_id, redirect_uri, state } = getQuery(event) as Record<string, string>

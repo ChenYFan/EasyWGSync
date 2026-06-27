@@ -105,8 +105,16 @@ export const PROXY_MARKER = '[EasyWGSync PROXY] source-NAT:'
 export function buildProxyScript(proxiedIPs: string[]): { up: string; down: string } {
   const mark = `# ${PROXY_MARKER}`
   const cmd = (ip: string) => (ip.includes(':') ? 'ip6tables' : 'iptables')
+  // PostUp: add one MASQUERADE rule per proxied source IP (first bring-up).
   const up = proxiedIPs.map(ip => `${cmd(ip)} -t nat -A POSTROUTING -s ${ip} -o %i -j MASQUERADE`)
-  const down = proxiedIPs.map(ip => `${cmd(ip)} -t nat -D POSTROUTING -s ${ip} -o %i -j MASQUERADE`)
+  // PostDown: one-shot clear of every MASQUERADE rule on the %i interface. Lists
+  // the POSTROUTING rules touching %i, flips -A→-D, deletes each. Precise (only
+  // -o %i + MASQUERADE rules) and idempotent — safer than a full nat-table
+  // reload. ewctl does incremental -A/-D between runs; this is the full teardown.
+  const down = [
+    `iptables -t nat -S POSTROUTING | grep -E -- '-o %i ' | grep -E -- '-j MASQUERADE' | sed 's/^-A/-D/' | xargs -r -L1 iptables -t nat`,
+    `ip6tables -t nat -S POSTROUTING | grep -E -- '-o %i ' | grep -E -- '-j MASQUERADE' | sed 's/^-A/-D/' | xargs -r -L1 ip6tables -t nat`,
+  ]
   return { up: `${mark}\n${up.join('; ')}`, down: `${mark}\n${down.join('; ')}` }
 }
 
@@ -126,6 +134,9 @@ export interface RenderModel {
   gatewayEdges: Set<string>
   /** pubkeys acting as a proxy PUBLIC (their PostUp carries the MASQUERADE block). */
   proxies: Set<string>
+  /** pubkey → proxied source IPs (the -s CIDRs this node MASQUERADEs). Surfaced
+   *  as a JSON comment block in the .conf so ewctl can diff without parsing scripts. */
+  proxyLists: Record<string, string[]>
   /** connection keys that are gateway-declared & read-only, with no underlying conn. */
   connNoUnderlying: Set<string>
 }
@@ -213,7 +224,7 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
   }
 
   const model: RenderModel = {
-    peers: {}, conns: {}, gatewayEdges: new Set(), proxies: new Set(), connNoUnderlying: new Set(),
+    peers: {}, conns: {}, gatewayEdges: new Set(), proxies: new Set(), proxyLists: {}, connNoUnderlying: new Set(),
   }
 
   // --- declaration queries (once) ---
@@ -236,6 +247,7 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
     const arr = proxySrcIPs.get(pub) || []
     for (const ip of ownIPsOf(base, priv)) if (!arr.includes(ip)) arr.push(ip)
     proxySrcIPs.set(pub, arr)
+    model.proxyLists[pub] = arr
   }
   for (const d of (hm?.DECLARATIONS?.PROXY || [])) {
     if (d.ENABLED !== false && topo.hasUnderlyingConnection(d.PUBLIC_PEER, d.PRIVATE_PEER)) addProxy(d.PUBLIC_PEER, d.PRIVATE_PEER)

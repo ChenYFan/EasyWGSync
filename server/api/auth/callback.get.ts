@@ -7,6 +7,13 @@ const log = createLogger('Auth:Callback')
 // Casdoor role required to access EasyWGSync.
 const REQUIRED_ROLE = 'easywgsync'
 
+defineRouteMeta({ openAPI: {
+    "summary": "登录回调",
+    "description": "Casdoor 登录完成后的回调端点，校验角色后签发登录凭证。无需手动调用。",
+    "tags": [
+      "auth"
+    ]
+  } })
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig()
   const { code } = getQuery(event) as Record<string, string>
