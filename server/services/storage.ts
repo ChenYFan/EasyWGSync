@@ -48,6 +48,20 @@ async function releaseLock(): Promise<void> {
   await unlink(LOCK_PATH).catch(() => {})
 }
 
+/**
+ * The config.json file's last-modified time (ms since epoch). Used as the
+ * "config version" written into each peer .conf so ewctl can skip re-applying
+ * when the version is unchanged since its last sync. Reflects any write
+ * (commit / global / peer / p2p / mesh-group) since all go through config.json.
+ */
+export async function getConfigMtime(): Promise<number> {
+  try {
+    return (await stat(CONFIG_PATH)).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
 export async function readSyncConfig(): Promise<SyncConfig> {
   if (!existsSync(CONFIG_PATH)) {
     return { ...DEFAULT_CONFIG }

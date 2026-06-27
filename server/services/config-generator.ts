@@ -2,6 +2,7 @@ import { configService } from './config-service'
 import { fetchAllPeers, fetchRawConfig, fetchGlobalDefaults, fetchInterfaceInfo } from './wg-dashboard'
 import { getShowEndpoints, derivePubKey } from './wireguard'
 import { parsePeerConf, buildDefaultPeerConfig } from './wg-conf-parser'
+import { getConfigMtime } from './storage'
 import { createLogger } from '../utils/logger'
 import { renderConfig, buildHistories } from '~/composables/useRenderModel'
 import type { SyncConfig } from '~/types'
@@ -306,15 +307,15 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
 
   result += '\n# ===EasyWGSync托管，P2P配置结束=== #\n'
 
-  // Append a JSON comment block with this peer's proxy list (the source IPs it
-  // MASQUERADEs). ewctl reads this to diff against live iptables and apply
-  // incremental -A/-D without parsing PostUp scripts or tearing down the link.
-  // wg-quick ignores '#' comment lines, so this never affects WireGuard itself.
+  // Append a single ExtraInfo JSON comment block at the end. ewctl reads this
+  // for: the proxy list (source IPs to MASQUERADE — diffed against live
+  // iptables for incremental -A/-D) and savedAt (config version timestamp —
+  // skip a no-op sync when unchanged). wg-quick ignores '#' comment lines, so
+  // this never affects WireGuard itself.
   const proxied = model.proxyLists[PubKey] || []
-  if (proxied.length) {
-    const json = JSON.stringify({ proxied })
-    result += `\n#===EASYWGSYNC_PROXY_START===#\n#${json}\n#===EASYWGSYNC_PROXY_END===#\n`
-  }
+  const savedAt = await getConfigMtime()
+  const extra = JSON.stringify({ proxied, savedAt })
+  result += `\n#===EASYWGSYNC_EXTRA_START===#\n#${extra}\n#===EASYWGSYNC_EXTRA_END===#\n`
 
   return result
 }

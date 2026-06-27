@@ -19,22 +19,47 @@ install_ewctl() {
 }
 
 configure_ewctl() {
-    echo "正在配置 ewctl..."
-    echo "$@" > "$CONFIG_FILE"
-    echo "配置已保存到 $CONFIG_FILE"
+    # Append one network config (a single line: WG_INTERFACE ip:port secret peername).
+    # De-dup by interface name: if an entry for the same interface exists, replace it.
+    local NEW_LINE="$*"
+    local NEW_IFACE="${NEW_LINE%% *}"
+    mkdir -p "$(dirname "$CONFIG_FILE")" 2>/dev/null
+    touch "$CONFIG_FILE"
+    local TMP=$(mktemp)
+    local replaced=0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local iface="${line%% *}"
+        if [[ "$iface" == "$NEW_IFACE" ]]; then
+            echo "$NEW_LINE" >> "$TMP"
+            replaced=1
+        else
+            echo "$line" >> "$TMP"
+        fi
+    done < "$CONFIG_FILE"
+    [[ $replaced -eq 0 ]] && echo "$NEW_LINE" >> "$TMP"
+    mv "$TMP" "$CONFIG_FILE"
+    echo "配置已保存到 $CONFIG_FILE (接口 ${NEW_IFACE})"
 }
 run_ewctl() {
     echo "正在运行 ewctl 主函数..."
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        echo "配置文件不存在，请先进行配置。"
+    if [[ ! -f "$CONFIG_FILE" || ! -s "$CONFIG_FILE" ]]; then
+        echo "配置文件不存在或为空，请先进行配置。"
         exit 1
     fi
-    CONFIG_PARAMS=$(<"$CONFIG_FILE")
-    EasyWireGuardSync $CONFIG_PARAMS
+    # Run EasyWireGuardSync for each configured network (one line per network).
+    local failed=0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        echo "----- 网络: ${line%% *} -----"
+        EasyWireGuardSync $line || failed=1
+    done < "$CONFIG_FILE"
+    return $failed
 }
 uninstall_ewctl() {
     echo "正在卸载 ewctl..."
     rm -f "$EWCTL_PATH" "$CONFIG_FILE"
+    rm -rf /var/lib/ewctl
     echo "ewctl 已卸载。"
 }
 
@@ -71,12 +96,12 @@ register_crontab() {
 }
 sync_proxy() {
     local IFACE="$1" CONF="$2"
-    # Target proxy list from the .conf JSON comment block.
-    local TARGET_JSON
-    TARGET_JSON=$(awk "/#===EASYWGSYNC_PROXY_START===#/{f=1;next}/#===EASYWGSYNC_PROXY_END===#/{f=0}f" "$CONF" | grep "^#" | sed "s/^#//")
+    # Target proxy list from the .conf ExtraInfo JSON block (the proxied field).
+    local EXTRA_JSON
+    EXTRA_JSON=$(awk "/#===EASYWGSYNC_EXTRA_START===#/{f=1;next}/#===EASYWGSYNC_EXTRA_END===#/{f=0}f" "$CONF" | grep "^#" | sed "s/^#//")
     local TARGET_IPS=()
-    if [[ -n "$TARGET_JSON" ]]; then
-        while IFS= read -r ip; do [[ -n "$ip" ]] && TARGET_IPS+=("$ip"); done < <(echo "$TARGET_JSON" | grep -oE ""proxied":\[[^]]*\]" | grep -oE "[0-9a-fA-F:.]+/[0-9]+")
+    if [[ -n "$EXTRA_JSON" ]]; then
+        while IFS= read -r ip; do [[ -n "$ip" ]] && TARGET_IPS+=("$ip"); done < <(echo "$EXTRA_JSON" | grep -oE "\"proxied\":\[[^]]*\]" | grep -oE "[0-9a-fA-F:.]+/[0-9]+")
     fi
 
     # Current proxy list from live iptables (stateless — no local state file).
@@ -132,7 +157,18 @@ EasyWireGuardSync() {
         echo "错误: 无法下载配置文件或文件为空。"
         return 1
     fi
+
+    # Config version (savedAt) from the ExtraInfo block. Skip the no-op sync if
+    # the version is unchanged since the last successful apply (interface exists).
+    local NEW_SAVED_AT
+    NEW_SAVED_AT=$(awk "/#===EASYWGSYNC_EXTRA_START===#/{f=1;next}/#===EASYWGSYNC_EXTRA_END===#/{f=0}f" "${CONFIG_DIR}" | grep "^#" | sed "s/^#//" | grep -oE "\"savedAt\":[0-9]+" | grep -oE "[0-9]+")
+    local STATE_DIR="/var/lib/ewctl"
+    local STATE_FILE="${STATE_DIR}/${WG_INTERFACE}.savedAt"
     if ip link show "${WG_INTERFACE}" &> /dev/null; then
+        if [[ -n "${NEW_SAVED_AT}" && -f "${STATE_FILE}" && "$(cat "${STATE_FILE}" 2>/dev/null)" == "${NEW_SAVED_AT}" ]]; then
+            echo "配置版本未变化 (savedAt=${NEW_SAVED_AT})，跳过同步。"
+            return 0
+        fi
         echo "接口 ${WG_INTERFACE} 已存在，正在更新配置..."
         wg syncconf ${WG_INTERFACE} <(wg-quick strip ${CONFIG_DIR})
         sync_proxy "${WG_INTERFACE}" "${CONFIG_DIR}"
@@ -144,6 +180,9 @@ EasyWireGuardSync() {
         echo "错误: 无法应用 WireGuard 配置。"
         return 1
     fi
+    # Record the applied version so the next run can skip if unchanged.
+    mkdir -p "${STATE_DIR}" 2>/dev/null
+    [[ -n "${NEW_SAVED_AT}" ]] && echo -n "${NEW_SAVED_AT}" > "${STATE_FILE}"
     echo "WireGuard 配置已成功应用。"
     return 0
 }
@@ -182,8 +221,8 @@ case $ACTION in
         echo "欢迎使用 EasyWireGuardSync 客户端脚本！"
         echo "请使用以下命令进行操作："
         echo "安装: $0 0"
-        echo "配置: $0 1 [配置参数]"
-        echo "运行: $0 2"
+        echo "配置: $0 1 接口名 ip:port secret peername] "
+        echo "运行: $0 2 "
         echo "注册定时任务: $0 3"
         echo "直接运行主函数: $0 4 [配置参数]"
         echo "更新: $0 5"
