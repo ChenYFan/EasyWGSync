@@ -6,8 +6,9 @@ const log = createLogger('API:getAllPeerNames')
 defineRouteMeta({ openAPI: {
     "summary": "获取全部节点名",
     "description": "返回所有节点的文件名列表。客户端用于查找配置。query 传 secret 鉴权。",
-    "tags": [
-      "client"
+    "tags": ["client"],
+    "parameters": [
+      { "name": "secret", "in": "query", "required": true, "schema": { "type": "string" }, "description": "客户端拉取密钥" }
     ]
   } })
 export default defineEventHandler(async (event) => {

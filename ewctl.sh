@@ -3,11 +3,36 @@ ACTION=$1
 shift
 CONFIG_FILE="/usr/bin/ewctl.cfg"
 EWCTL_PATH="/usr/bin/ewctl"
-DEPENDENCIES=(wireguard openresolv net-tools iptables)
 
 install_dependencies() {
     echo "正在安装依赖..."
-    apt install -y "${DEPENDENCIES[@]}"
+    # Detect distro family via /etc/os-release and pick the package manager + the
+    # distro-appropriate package names. wireguard-tools/iptables/net-tools are
+    # required; a resolvconf provider is best-effort (openresolv on Debian,
+    # resolvconf on Ubuntu, wireguard-tools bundles one on Arch).
+    local ID_LIKE=""
+    [[ -f /etc/os-release ]] && . /etc/os-release
+    local family="${ID_LIKE:-$ID}"
+    case "$family" in
+        *arch*|*manjaro*)
+            pacman -Sy --noconfirm wireguard-tools iptables net-tools openresolv 2>/dev/null \
+                || echo "警告: 部分依赖安装失败"
+            ;;
+        *fedora*|*rhel*|*centos*|*rocky*|*alma*|*amzn*)
+            # RHEL/CentOS 8+ / Fedora / Rocky / Alma: dnf (fallback yum).
+            local PKG=(dnf yum); local mgr=""
+            for c in "${PKG[@]}"; do command -v "$c" >/dev/null 2>&1 && mgr="$c" && break; done
+            [[ -z "$mgr" ]] && { echo "错误: 未找到 dnf/yum"; return 1; }
+            $mgr install -y epel-release 2>/dev/null
+            $mgr install -y wireguard-tools iptables net-tools 2>/dev/null \
+                || echo "警告: 部分依赖安装失败 (可能需要先启用 EPEL)"
+            ;;
+        *debian*|*ubuntu*|*)
+            apt install -y wireguard net-tools iptables
+            apt install -y openresolv 2>/dev/null || apt install -y resolvconf 2>/dev/null \
+                || echo "警告: 未安装 resolvconf/openresolv (DNS 解析可能受限)"
+            ;;
+    esac
     mkdir -p /etc/wireguard
 }
 install_ewctl() {

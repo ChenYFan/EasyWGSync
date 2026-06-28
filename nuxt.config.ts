@@ -1,3 +1,10 @@
+// Load + validate env (reads .env, fails fast on misconfig) before Nitro boots.
+// In dev/build this top-level import runs before Nitro starts, so NITRO_PORT
+// below is in process.env before Nitro reads its listen port. In production,
+// scripts/start-prod.mjs does the same job (nuxt.config isn't re-evaluated).
+import env from './env.js'
+process.env.NITRO_PORT ||= String(env.port)
+
 export default defineNuxtConfig({
   devtools: { enabled: true },
 
@@ -30,6 +37,16 @@ export default defineNuxtConfig({
     preset: 'node-server',
     experimental: {
       openAPI: true,
+    },
+    // Register the /_openapi.json + /_scalar routes in production builds too.
+    // Without `production`, Nitro only serves them in dev (resolveOpenAPIOptions
+    // returns early for non-dev without this), so Scalar 404s in production.
+    openAPI: {
+      production: 'runtime',
+      // Raw spec at an internal path; a custom /_openapi.json route adds
+      // x-internal to the Internal/App Routes tags so Scalar hides Nitro's
+      // non-API routes.
+      route: '/_openapi-raw',
     },
   },
 
