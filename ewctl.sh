@@ -48,6 +48,10 @@ configure_ewctl() {
     # De-dup by interface name: if an entry for the same interface exists, replace it.
     local NEW_LINE="$*"
     local NEW_IFACE="${NEW_LINE%% *}"
+    if [[ -z "$NEW_IFACE" || $# -lt 4 ]]; then
+        echo "用法: ewctl 1 <接口名> <ip:port> <secret> <peername>"
+        exit 1
+    fi
     mkdir -p "$(dirname "$CONFIG_FILE")" 2>/dev/null
     touch "$CONFIG_FILE"
     local TMP=$(mktemp)
@@ -132,11 +136,11 @@ sync_proxy() {
     # Current proxy list from live iptables (stateless — no local state file).
     local CUR_IPS=()
     while IFS= read -r rule; do
-        local ip=$(echo "$rule" | grep -oE "\-s [0-9a-fA-F:.]+/[0-9]+" | awk "{print $2}")
+        local ip=$(echo "$rule" | grep -oE '\-s [0-9a-fA-F:.]+/[0-9]+' | cut -d' ' -f2)
         [[ -n "$ip" ]] && CUR_IPS+=("$ip")
     done < <(iptables -t nat -S POSTROUTING 2>/dev/null | grep -E -- "-o ${IFACE} " | grep -E -- "-j MASQUERADE")
     while IFS= read -r rule; do
-        local ip=$(echo "$rule" | grep -oE "\-s [0-9a-fA-F:.]+/[0-9]+" | awk "{print $2}")
+        local ip=$(echo "$rule" | grep -oE '\-s [0-9a-fA-F:.]+/[0-9]+' | cut -d' ' -f2)
         [[ -n "$ip" ]] && CUR_IPS+=("$ip")
     done < <(ip6tables -t nat -S POSTROUTING 2>/dev/null | grep -E -- "-o ${IFACE} " | grep -E -- "-j MASQUERADE")
 
