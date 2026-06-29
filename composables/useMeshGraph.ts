@@ -1,11 +1,8 @@
 import type { Node, Edge } from '@vue-flow/core'
 import { ref } from 'vue'
 
-const GROUP_COLORS = [
-  '#3B82F6', '#EF4444', '#10B981', '#F59E0B', '#8B5CF6',
-  '#EC4899', '#06B6D4', '#F97316', '#6366F1', '#14B8A6',
-]
-
+const DARK_COLORS = ['#5271ff', '#8c52ff', '#b174e7', '#cb6ce6', '#ff66c4', '#ff5050', '#ff5757', '#ff914d', '#ffbd59', '#ffde59', '#c1ff72', '#99e17a', '#5cffb0', '#69f2c4', '#5ce1e6', '#5ce7ff', '#70cbff', '#5ca3ff', '#99acff', '#bea1f7', '#cea8f0', '#e1a8f0', '#ff99d8', '#ffadad', '#ff9999', '#ffc099', '#ffd699', '#ffeb99', '#d3ff99', '#bfecac', '#99ffce', '#a1f7da', '#a7eff1', '#99f0ff', '#99daff', '#99c5ff', '#1f48ff', '#5e17eb', '#9440dd', '#bc3fde', '#ff1fa9', '#ff3a3a', '#ff3131', '#ff751f', '#ffa51f', '#ffd21f', '#9eff1f', '#7ed957', '#1fff93', '#31edae', '#3ddbe1', '#0cc0df', '#38b6ff', '#1f80ff']
+const LIGHT_COLORS = ['#0025cc', '#4910bc', '#6b1fad', '#8f1eae', '#cc007e', '#ff2828', '#cc0000', '#cc4e00', '#cc7a00', '#cca300', '#74cc00', '#4ca626', '#00bf63', '#10bb82', '#1cabb0', '#0097b2', '#0081cc', '#004aad', '#00167a', '#2c0a71', '#401268', '#561269', '#7a004b', '#661414', '#7a0000', '#7a2f00', '#7a4900', '#7a6200', '#457a00', '#2e6417', '#007a3f', '#0a714e', '#11676a', '#00687a', '#004e7a', '#00357a', '#1f48ff', '#5e17eb', '#9440dd', '#bc3fde', '#ff1fa9', '#ff3a3a', '#ff3131', '#ff751f', '#ffa51f', '#ffd21f', '#9eff1f', '#7ed957', '#1fff93', '#31edae', '#3ddbe1', '#0cc0df', '#38b6ff', '#1f80ff']
 // Reactive dark mode state (updated by theme-changed event)
 export const isDarkMode = ref(typeof document !== 'undefined' ? document.documentElement.classList.contains('dark') : true)
 
@@ -15,17 +12,27 @@ if (typeof window !== 'undefined') {
   })
 }
 
+// Ordered color assignment: real groups take palette indices in first-sight
+// order (module-singleton → stable within a session). CENTER/ORPHAN excluded.
+const groupColorIndex = new Map<string, number>()
+let nextGroupColor = 0
+
 export function getGroupColor(groupName: string): string {
   if (groupName === 'CENTER_GROUP') {
     return isDarkMode.value ? '#ffffff' : '#000000'
   }
   if (groupName === 'ORPHAN_GROUP') return '#6b7280'
-  let hash = 0
-  for (let i = 0; i < groupName.length; i++) {
-    hash = ((hash << 5) - hash) + groupName.charCodeAt(i)
-    hash |= 0
+  // Assign palette colors in order: each real group, on first sight, takes the
+  // next index. Palettes are gradient-ordered (first 18 = maximally distinct
+  // hues), so consecutive groups get distinct hues — no hashing/collisions.
+  // Light/dark mode pick from their own shade set.
+  let idx = groupColorIndex.get(groupName)
+  if (idx === undefined) {
+    idx = nextGroupColor++
+    groupColorIndex.set(groupName, idx)
   }
-  return GROUP_COLORS[Math.abs(hash) % GROUP_COLORS.length]
+  const palette = isDarkMode.value ? DARK_COLORS : LIGHT_COLORS
+  return palette[idx % palette.length]
 }
 
 export function shortenKey(pubkey: string): string {

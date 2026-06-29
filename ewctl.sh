@@ -134,15 +134,18 @@ sync_proxy() {
     fi
 
     # Current proxy list from live iptables (stateless — no local state file).
+    # ONLY our proxy rules: `-s <ip> -o %i -j MASQUERADE` with NO `-d`. The domain
+    # NAT (`-s <net> ! -d <net> ... -j MASQUERADE`) and any manual `-d` rule are
+    # excluded — sync_proxy must never touch them.
     local CUR_IPS=()
     while IFS= read -r rule; do
         local ip=$(echo "$rule" | grep -oE '\-s [0-9a-fA-F:.]+/[0-9]+' | cut -d' ' -f2)
         [[ -n "$ip" ]] && CUR_IPS+=("$ip")
-    done < <(iptables -t nat -S POSTROUTING 2>/dev/null | grep -E -- "-o ${IFACE} " | grep -E -- "-j MASQUERADE")
+    done < <(iptables -t nat -S POSTROUTING 2>/dev/null | grep -E -- "-o ${IFACE} " | grep -E -- "-j MASQUERADE" | grep -v -- "-d ")
     while IFS= read -r rule; do
         local ip=$(echo "$rule" | grep -oE '\-s [0-9a-fA-F:.]+/[0-9]+' | cut -d' ' -f2)
         [[ -n "$ip" ]] && CUR_IPS+=("$ip")
-    done < <(ip6tables -t nat -S POSTROUTING 2>/dev/null | grep -E -- "-o ${IFACE} " | grep -E -- "-j MASQUERADE")
+    done < <(ip6tables -t nat -S POSTROUTING 2>/dev/null | grep -E -- "-o ${IFACE} " | grep -E -- "-j MASQUERADE" | grep -v -- "-d ")
 
     # Diff: add new (-A), remove gone (-D). v4 -> iptables, v6 -> ip6tables.
     for ip in "${TARGET_IPS[@]}"; do
