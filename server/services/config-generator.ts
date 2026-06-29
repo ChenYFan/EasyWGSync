@@ -106,8 +106,11 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
 
   // ===== 第二段: mesh [Peer] =====
   // For each mesh peer X: AllowedIPs/Endpoint = this viewer's per-connection
-  // override (me.conns[X]) if present, else X's OWN converged values
-  // (finalConf.peers[X] — own address + relay'd IPs). All from finalConf.
+  // view (me.conns[X]) if a manual P2P override exists — its allowedIPs already
+  // carries X's own peer history (default + relay + X's manual) PLUS this
+  // viewer's manual, converged. With no P2P override there is no conn entry, so
+  // fall back to X's own converged ownAllowedIPs (= the same peer history, just
+  // without a viewer layer). Both paths read X's declared IPs — never raw .conf.
   const meshPeers = new Set<string>()
   for (const [, group] of Object.entries(finalConf.meshGroups || {})) {
     const members = Array.isArray(group) ? group : (group as any).PEERS
@@ -129,7 +132,7 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
     if (peer.comments && peer.comments !== 'none') lines.push(`#Comments = ${peer.comments}`)
     lines.push(`PublicKey = ${peerPubKey}`)
 
-    const aip = realList(view?.allowedIPs) .length ? realList(view?.allowedIPs) : realList(peer.ownAllowedIPs)
+    const aip = realList(view?.allowedIPs).length ? realList(view?.allowedIPs) : realList(peer.ownAllowedIPs)
     if (aip.length) lines.push(`AllowedIPs = ${aip.join(', ')}`)
 
     const ep = (view?.endpoint && view.endpoint !== 'none') ? view.endpoint

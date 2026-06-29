@@ -41,16 +41,29 @@ export interface DisplayMod extends Mod {
  *   override → acc = value (replace)
  *   append   → acc = acc + sep + value (add; acc empty → value)
  *   none     → mark deleted
+ *
+ * MANUAL SINK: before folding, every record with layer 'extra' (manual edits)
+ * is shifted — preserving relative order — to the END of the list. So a node's
+ * own manual declaration always applies on top of everything it inherited from
+ * the other peer's history + declarations, regardless of where it was recorded.
+ * op is NOT inspected here (override sinks the same as append); if the user
+ * chose override, it simply wipes the accumulated value — their call.
+ *
  * 'none' has lowest priority: it is resolved by the running fold like any other
  * record (a later override/append revives the key); only a SURVIVING delete at
  * the end yields final = null.
  */
 export function converge(history: FieldHistory, sep: string): Converged {
+  // Sink all manual (extra-layer) records to the end, keeping their relative order.
+  const nonManual = history.filter(m => m.layer !== 'extra')
+  const manual = history.filter(m => m.layer === 'extra')
+  const ordered = manual.length ? [...nonManual, ...manual] : history
+
   let acc: string | null = null
   let deleted = false
   const seen: DisplayMod[] = []
 
-  for (const m of history) {
+  for (const m of ordered) {
     // Skip empty contributions (inherit ≡ no record). Keep 'none' even if value empty.
     if (m.op !== 'none' && (m.value === undefined || m.value === null || m.value === '')) continue
     seen.push({ ...m, superseded: false })
@@ -379,15 +392,18 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
   }
 
   // ---- Connection: gateway edges X → A (whole-domain override) ----
+  // The conn's ALLOWED_IPS history = A's own peer history (default + relay +
+  // A's own manual — A's global declarations) + the gateway domain override +
+  // X's manual P2P override. converge sinks both manuals to the end, so the
+  // domain override wipes A's accumulated value, then A's manual + X's manual
+  // append on top in order.
   for (const gw of gatewayDecls) {
     const key = `${gw.PRIVATE_PEER}|${gw.PUBLIC_PEER}`
     model.gatewayEdges.add(`${gw.PRIVATE_PEER}->${gw.PUBLIC_PEER}`)
-    const aDefault = base.basePeers.find(b => b.publicKey === gw.PUBLIC_PEER)?.default
-    const baseAllowed = aDefault?.address?.length ? aDefault.address.join(', ') : null
-    const cP2p = EXTRA[gw.PRIVATE_PEER]?.P2P_CONFIG?.[gw.PUBLIC_PEER]
-    const allowedHist: FieldHistory = []
-    pushDefault(allowedHist, baseAllowed)
+    const aHist = model.peers[gw.PUBLIC_PEER]?.ALLOWED_IPS
+    const allowedHist: FieldHistory = aHist ? aHist.map(m => ({ ...m })) : []
     if (domainIPs.length) allowedHist.push({ layer: 'declaration', op: 'override', value: domainIPs.join(', '), origin: `gateway:${gw.PUBLIC_PEER}` })
+    const cP2p = EXTRA[gw.PRIVATE_PEER]?.P2P_CONFIG?.[gw.PUBLIC_PEER]
     pushExtra(allowedHist, cP2p?.ALLOWED_IPS ? cP2p.ALLOWED_IPS.join(', ') : undefined)
     model.conns[key] = {
       ENDPOINT: histOf(base.onlineEndpoints?.[gw.PUBLIC_PEER] || null, cP2p?.ENDPOINT),
@@ -398,11 +414,10 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
 
   // ---- Connection: plain mesh edges with a manual P2P override (src → tgt) ----
   // Any EXTRA_CONFIG[src].P2P_CONFIG[tgt] not already modeled as CENTER/gateway
-  // is a per-viewer override on a plain mesh edge. Model it (extra-only — no
-  // default: the consumer merges override ?? the target peer's own value, so
-  // relay'd IPs in tgt.ownAllowedIPs survive when allowedIPs isn't overridden).
-  // Without this, the override lives only in the draft and never reaches
-  // finalConf → the .conf and graph miss it while the panel (live preview) shows it.
+  // is a per-viewer override on a plain mesh edge. The conn's ALLOWED_IPS
+  // history = tgt's own peer history (default + relay + tgt's own manual — tgt's
+  // global declarations) + src's manual P2P override. converge sinks the manuals
+  // to the end, so src's override appends on top of everything tgt declared.
   for (const [src, ec] of Object.entries(EXTRA)) {
     const p2pAll = (ec as any)?.P2P_CONFIG
     if (!p2pAll) continue
@@ -410,9 +425,12 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
       if (tgt === 'CENTRAL_NODE') continue
       const key = `${src}|${tgt}`
       if (model.conns[key]) continue   // already built (gateway)
+      const tgtHist = model.peers[tgt]?.ALLOWED_IPS
+      const allowedHist: FieldHistory = tgtHist ? tgtHist.map(m => ({ ...m })) : []
+      pushExtra(allowedHist, p2p?.ALLOWED_IPS ? p2p.ALLOWED_IPS.join(', ') : undefined)
       model.conns[key] = {
         ENDPOINT: histOf(null, p2p?.ENDPOINT),
-        ALLOWED_IPS: histOf(null, p2p?.ALLOWED_IPS ? p2p.ALLOWED_IPS.join(', ') : undefined),
+        ALLOWED_IPS: allowedHist,
         PERSISTENT_KEEPALIVE: histOf(null, p2p?.PERSISTENT_KEEPALIVE != null ? String(p2p.PERSISTENT_KEEPALIVE) : undefined),
       }
     }
@@ -508,7 +526,6 @@ export function renderConfig(base: GraphBase, draft: SyncConfig, prebuilt?: Rend
       fp.scripts[t] = f === null ? 'none' : f
     }
   }
-
   for (const [key, cf] of Object.entries(model.conns)) {
     const [src, p2pKey] = key.split('|')
     const conn: FinalConnConfig = { allowedIPs: [] }
@@ -561,7 +578,13 @@ function withFormExtra(history: FieldHistory, extra: Mod | null): FieldHistory {
 /** Converge a field for the live preview: cached history + form's extra value. */
 export function convergeField(model: RenderModel, scope: 'peers' | 'conns', id: string, field: string, extraRaw: string | undefined): Converged {
   const base = (model[scope] as Record<string, Record<string, FieldHistory>>)[id]?.[field] || []
-  return converge(withFormExtra(base, extraMod(extraRaw)), sepOf(field))
+  const extra = extraMod(extraRaw)
+  // peer scope: the history's own extra IS this form's manual — replace it.
+  // conns scope: the history's extra is the OTHER peer's manual (copied from its
+  // peer history); the form's manual is the viewer's own, NOT in the history —
+  // append it and let converge sink both manuals to the end.
+  const hist = scope === 'peers' ? withFormExtra(base, extra) : (extra ? [...base, extra] : base)
+  return converge(hist, sepOf(field))
 }
 
 // =========================================================================
