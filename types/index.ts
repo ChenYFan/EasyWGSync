@@ -102,6 +102,7 @@ export interface ParsedPeerConf {
  */
 export interface DefaultPeerConfig {
   publicKey: string
+  privateKey: string                      // node's own .conf [Interface] PrivateKey (admin-only)
   fileName: string
   isOnline: boolean
   // From parsed .conf [Interface]

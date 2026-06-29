@@ -12,31 +12,10 @@ const log = createLogger('ConfigGenerator')
 
 const SCRIPT_TYPES: ScriptType[] = ['PreUp', 'PostUp', 'PreDown', 'PostDown']
 
-// Parse a raw .conf text (the CENTER wg0.conf) into per-peer [Peer] blocks,
-// keyed by PublicKey. Used to source mesh peers' PublicKey + default fields.
-function parseRawPeers(rawConf: string): Record<string, Record<string, string>> {
-  const out: Record<string, Record<string, string>> = {}
-  let section: 'interface' | 'peer' | null = null
-  let cur: Record<string, string> | null = null
-  for (const raw of rawConf.split('\n')) {
-    const line = raw.trim()
-    if (!line || line.startsWith('#') || line.startsWith(';')) continue
-    const sec = line.match(/^\[(.+)\]$/)
-    if (sec) {
-      if (cur && section === 'peer' && cur.PublicKey) out[cur.PublicKey] = cur
-      section = sec[1].toLowerCase() === 'peer' ? 'peer' : 'interface'
-      cur = section === 'peer' ? {} : null
-      continue
-    }
-    if (section !== 'peer' || !cur) continue
-    const eq = line.indexOf('=')
-    if (eq === -1) continue
-    const key = line.slice(0, eq).trim().replace(/\s+/g, '')
-    const val = line.slice(eq + 1).trim()
-    if (key && val) cur[key] = val
-  }
-  if (cur && section === 'peer' && cur.PublicKey) out[cur.PublicKey] = cur
-  return out
+/** A converged AllowedIPs list with the ['none'] deleted-sentinel dropped. */
+function realList(v: string[] | undefined): string[] {
+  if (!v || (v.length === 1 && v[0] === 'none')) return []
+  return v
 }
 
 export async function generatePeerConfig(peerName: string, overrideConfig?: SyncConfig): Promise<string> {
@@ -87,113 +66,82 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
   }
 
   const model = buildHistories(base, rawConfig)
-  const env = renderConfig(base, rawConfig, model)
+  const finalConf = renderConfig(base, rawConfig, model)
 
-  const peerData = wgPeers.find(p => p.fileName === peerName)
-  if (!peerData?.file) return ''
-
-  const parsedPeer = parsePeerConf(peerData.file)
-  if (!parsedPeer.privateKey) return ''
-  const priKey = parsedPeer.privateKey
-  const pubKey = await derivePubKey(priKey)
-  if (!pubKey) return ''
-
-  const extra = env.EXTRA_CONFIG?.[pubKey] || {}
-  const p2p = extra.P2P_CONFIG || {}
+  // Identify the target peer by fileName → publicKey (from basePeers, built once).
+  const targetBase = basePeers.find(b => b.fileName === peerName)
+  if (!targetBase) return ''
+  const pubKey = targetBase.publicKey
+  const me = finalConf.peers[pubKey]
+  if (!me || !me.privateKey) return ''
 
   // ===== 第一段: [Interface] + CENTER [Peer] =====
-  // renderConfig already converged default + extra + declaration into final
-  // values in `extra`. config-generator writes them directly — no fallback.
+  // finalConf is the fully-merged result (default→extra→declaration converged).
+  // config-generator only serializes it — never re-parses raw .conf, never
+  // falls back to a separate default. 'none' sentinel = deleted → omit.
   const lines: string[] = ['[Interface]']
 
-  // PrivateKey + Address: not modeled as field histories (raw .conf identity).
-  lines.push(`PrivateKey = ${priKey}`)
-  if (parsedPeer.address.length) lines.push(`Address = ${parsedPeer.address.join(', ')}`)
-
-  // ListenPort (converged — includes GLOBAL_LISTEN_PORT override)
-  if (extra.LISTEN_PORT != null) lines.push(`ListenPort = ${extra.LISTEN_PORT}`)
-
-  // DNS (converged — GLOBAL_DNS false → 'none' sentinel → omit; else final value)
-  if (extra.DNS && extra.DNS !== 'none') lines.push(`DNS = ${extra.DNS}`)
-
-  // Scripts (converged — includes GLOBAL_SCRIPTS + proxy declaration + default)
-  const scripts = extra.SCRIPTS || {}
+  lines.push(`PrivateKey = ${me.privateKey}`)
+  if (me.address.length) lines.push(`Address = ${me.address.join(', ')}`)
+  if (me.listenPort != null) lines.push(`ListenPort = ${me.listenPort}`)
+  if (me.dns && me.dns !== 'none') lines.push(`DNS = ${me.dns}`)
   for (const t of SCRIPT_TYPES) {
-    const content = scripts[t]
+    const content = me.scripts[t]
     if (content != null && content !== 'none' && content.trim() !== '') {
       lines.push(`${t} = ${content}`)
     }
   }
 
-  // [Peer] — CENTER (from converged P2P_CONFIG.CENTRAL_NODE)
-  if (centerPubKey && p2p.CENTRAL_NODE) {
-    const central = p2p.CENTRAL_NODE
+  // [Peer] — CENTER (this peer's converged view of CENTRAL_NODE)
+  const central = me.conns['CENTRAL_NODE']
+  if (centerPubKey && central) {
     lines.push('', '[Peer]')
-    if (extra.COMMENTS && extra.COMMENTS !== 'none') lines.push(`#Comments = ${extra.COMMENTS}`)
+    if (me.comments && me.comments !== 'none') lines.push(`#Comments = ${me.comments}`)
     lines.push(`PublicKey = ${centerPubKey}`)
-    if (central.ALLOWED_IPS && central.ALLOWED_IPS.length && !(central.ALLOWED_IPS.length === 1 && central.ALLOWED_IPS[0] === 'none')) {
-      lines.push(`AllowedIPs = ${central.ALLOWED_IPS.join(', ')}`)
-    }
-    if (central.ENDPOINT && central.ENDPOINT !== 'none') {
-      lines.push(`Endpoint = ${central.ENDPOINT}`)
-    }
-    if (central.PERSISTENT_KEEPALIVE != null && String(central.PERSISTENT_KEEPALIVE) !== 'none') {
-      lines.push(`PersistentKeepalive = ${central.PERSISTENT_KEEPALIVE}`)
-    }
+    const aip = realList(central.allowedIPs)
+    if (aip.length) lines.push(`AllowedIPs = ${aip.join(', ')}`)
+    if (central.endpoint && central.endpoint !== 'none') lines.push(`Endpoint = ${central.endpoint}`)
+    if (central.keepalive != null) lines.push(`PersistentKeepalive = ${central.keepalive}`)
   }
 
-  // ===== 第二段: mesh [Peer] (fully generated by us) =====
-  // Mesh peers' PublicKey + default AllowedIPs come from the CENTER wg0.conf
-  // (rawPeers) — they're not in the converge model. Per-peer overrides come
-  // from the converged P2P_CONFIG in `extra` (this peer's view of each peer).
-  const rawPeers = rawResult ? parseRawPeers(rawResult) : {}
+  // ===== 第二段: mesh [Peer] =====
+  // For each mesh peer X: AllowedIPs/Endpoint = this viewer's per-connection
+  // override (me.conns[X]) if present, else X's OWN converged values
+  // (finalConf.peers[X] — own address + relay'd IPs). All from finalConf.
   const meshPeers = new Set<string>()
-  for (const [name, group] of Object.entries(env.MESH_GROUPS || {})) {
+  for (const [, group] of Object.entries(finalConf.meshGroups || {})) {
     const members = Array.isArray(group) ? group : (group as any).PEERS
     const enabled = Array.isArray(group) ? true : (group as any).ENABLED !== false
     if (!enabled) continue
     if (members.includes(pubKey)) {
       for (const peerPubKey of members) {
-        if (peerPubKey === pubKey || !rawPeers[peerPubKey]) continue
+        if (peerPubKey === pubKey || !finalConf.peers[peerPubKey]) continue
         meshPeers.add(peerPubKey)
       }
     }
   }
 
   for (const peerPubKey of meshPeers) {
-    const rawPeer = rawPeers[peerPubKey]
-    const peerP2p = extra.P2P_CONFIG?.[peerPubKey]   // this peer's converged view of that peer
-    const peerExtra = env.EXTRA_CONFIG?.[peerPubKey] || {}
+    const peer = finalConf.peers[peerPubKey]   // X's own converged values
+    const view = me.conns[peerPubKey]          // this viewer's override of X
 
     lines.push('', '[Peer]')
-    if (peerExtra.COMMENTS && peerExtra.COMMENTS !== 'none') lines.push(`#Comments = ${peerExtra.COMMENTS}`)
+    if (peer.comments && peer.comments !== 'none') lines.push(`#Comments = ${peer.comments}`)
     lines.push(`PublicKey = ${peerPubKey}`)
 
-    // AllowedIPs: converged P2P_CONFIG overrides; default = peer's own address from CENTER .conf
-    const aip = peerP2p?.ALLOWED_IPS
-    if (aip && aip.length && !(aip.length === 1 && aip[0] === 'none')) {
-      lines.push(`AllowedIPs = ${aip.join(', ')}`)
-    } else if (rawPeer.AllowedIPs) {
-      lines.push(`AllowedIPs = ${rawPeer.AllowedIPs}`)
-    }
+    const aip = realList(view?.allowedIPs) .length ? realList(view?.allowedIPs) : realList(peer.ownAllowedIPs)
+    if (aip.length) lines.push(`AllowedIPs = ${aip.join(', ')}`)
 
-    // Endpoint: converged P2P_CONFIG overrides; default = online endpoint
-    const ep = peerP2p?.ENDPOINT
-    if (ep && ep !== 'none') {
-      lines.push(`Endpoint = ${ep}`)
-    } else if (onlineEndpoints[peerPubKey]) {
-      lines.push(`Endpoint = ${onlineEndpoints[peerPubKey]}`)
-    } else if (rawPeer.Endpoint) {
-      lines.push(`Endpoint = ${rawPeer.Endpoint}`)
-    }
+    const ep = (view?.endpoint && view.endpoint !== 'none') ? view.endpoint
+      : (peer.endpoint && peer.endpoint !== 'none') ? peer.endpoint : null
+    if (ep) lines.push(`Endpoint = ${ep}`)
 
-    // PersistentKeepalive: converged P2P_CONFIG or default 21
-    const ka = peerP2p?.PERSISTENT_KEEPALIVE
-    lines.push(`PersistentKeepalive = ${ka != null && String(ka) !== 'none' ? ka : 21}`)
+    const ka = view?.keepalive
+    lines.push(`PersistentKeepalive = ${ka != null ? ka : 21}`)
   }
 
   // ===== ExtraInfo (proxy list + savedAt, for ewctl) =====
-  const proxied = model.proxyLists[pubKey] || []
+  const proxied = me.proxyList || []
   const savedAt = await getConfigMtime()
   const extraInfo = JSON.stringify({ proxied, savedAt })
   lines.push('', `#===EASYWGSYNC_EXTRA_START===#`, `#${extraInfo}`, `#===EASYWGSYNC_EXTRA_END===#`)

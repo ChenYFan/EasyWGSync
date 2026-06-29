@@ -6,6 +6,7 @@
 // hitting the backend. Output shape matches what EasyWGSyncModel / panels expect.
 
 import type { SyncConfig, DefaultPeerConfig, WGDInterfaceInfo, WGDGlobalDefaults } from '~/types'
+import type { FinalConf } from '~/composables/useRenderModel'
 import { TopologyModel, normalizeMeshGroups } from '~/composables/useTopology'
 
 export interface GraphBase {
@@ -26,14 +27,25 @@ export interface DerivedGraph {
     GLOBAL_DNS: boolean
     GLOBAL_SCRIPTS: Record<string, string>
   }
-  // Raw config reference (for Relay/Gateway identification in EasyWGSyncModel)
-  config: SyncConfig
+  // The merged final config (for Relay/Gateway identification in EasyWGSyncModel).
+  config: FinalConf
 }
 
-export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroups?: Set<string>): DerivedGraph {
+/** A converged sentinel-aware string: 'none' (deleted) and '' → undefined. */
+function realStr(v: string | undefined): string | undefined {
+  return v && v !== 'none' ? v : undefined
+}
+/** A converged AllowedIPs list, dropping the ['none'] deleted sentinel. */
+function realIPs(v: string[] | undefined): string[] {
+  if (!v || (v.length === 1 && v[0] === 'none')) return []
+  return v
+}
+
+
+export function deriveGraphData(base: GraphBase, finalConf: FinalConf, hiddenGroups?: Set<string>): DerivedGraph {
   const { basePeers, centerPubKey, onlineEndpoints } = base
-  const EXTRA = config.EXTRA_CONFIG || {}
-  const MESH = config.MESH_GROUPS || {}
+  const PEERS = finalConf.peers
+  const MESH = finalConf.meshGroups || {}
 
   const nodes: any[] = []
   const knownPubKeys = new Set<string>()
@@ -68,42 +80,19 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
     const pubKey = peer.publicKey
     if (!pubKey || knownPubKeys.has(pubKey)) continue
     knownPubKeys.add(pubKey)
-    const extra = EXTRA[pubKey]
-    const dflt = peer.default
+    const fp = PEERS[pubKey]
     nodes.push({
       id: pubKey,
       type: 'peer',
       data: {
         publicKey: pubKey,
         fileName: peer.fileName,
-        comments: extra?.COMMENTS || '',
-        endpoint: extra?.ENDPOINT || onlineEndpoints[pubKey] || null,
+        comments: realStr(fp?.comments) || '',
+        endpoint: realStr(fp?.endpoint) || onlineEndpoints[pubKey] || null,
         isOnline: peer.isOnline,
         isCenter: false,
-        address: dflt?.address.join(', ') || '',
-        dns: extra?.DNS || dflt?.dns?.[0] || null,
-        groups: [] as string[],
-      },
-    })
-  }
-
-  // Peers that only exist in EXTRA_CONFIG (not in WGDashboard)
-  for (const pubKey of Object.keys(EXTRA)) {
-    if (knownPubKeys.has(pubKey)) continue
-    knownPubKeys.add(pubKey)
-    const extra = EXTRA[pubKey]
-    nodes.push({
-      id: pubKey,
-      type: 'peer',
-      data: {
-        publicKey: pubKey,
-        fileName: extra.COMMENTS || '',
-        comments: extra.COMMENTS || '',
-        endpoint: extra.ENDPOINT || null,
-        isOnline: pubKey in onlineEndpoints,
-        isCenter: false,
-        address: '',
-        dns: extra.DNS || null,
+        address: (fp?.address || peer.default.address).join(', ') || '',
+        dns: realStr(fp?.dns) || peer.default.dns?.[0] || null,
         groups: [] as string[],
       },
     })
@@ -177,7 +166,7 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
         const sharedGroups = Object.entries(MESH_NORMAL)
           .filter(([_, gg]) => gg.enabled && gg.members.includes(src) && gg.members.includes(tgt))
           .map(([n]) => n)
-        const p2p = EXTRA[src]?.P2P_CONFIG?.[tgt]
+        const p2p = PEERS[src]?.conns?.[tgt]
 
         edges.push({
           id: edgeKey,
@@ -187,8 +176,8 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
             groups: sharedGroups,
             primaryGroup: sharedGroups[0],
             hasP2PConfig: !!p2p,
-            p2pEndpoint: p2p?.ENDPOINT || null,
-            p2pAllowedIPs: p2p?.ALLOWED_IPS || [],
+            p2pEndpoint: realStr(p2p?.endpoint) || null,
+            p2pAllowedIPs: realIPs(p2p?.allowedIPs),
           },
         })
       }
@@ -204,7 +193,7 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
   // so the GW marker reflects the virtual-gateway state without special-casing.
   if (centerPubKey && !hiddenGroups?.has('CENTER_GROUP')) {
     for (const peerKey of allPeerKeys) {
-      const centralP2p = EXTRA[peerKey]?.P2P_CONFIG?.['CENTRAL_NODE']
+      const centralP2p = PEERS[peerKey]?.conns?.['CENTRAL_NODE']
 
       // peer → center (editable direction)
       const toCenterKey = `${peerKey}->${centerPubKey}`
@@ -218,8 +207,8 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
             groups: ['CENTER_GROUP'],
             primaryGroup: 'CENTER_GROUP',
             hasP2PConfig: !!centralP2p,
-            p2pEndpoint: centralP2p?.ENDPOINT || null,
-            p2pAllowedIPs: centralP2p?.ALLOWED_IPS || [],
+            p2pEndpoint: realStr(centralP2p?.endpoint) || null,
+            p2pAllowedIPs: realIPs(centralP2p?.allowedIPs),
             isToCenter: true,
           },
         })
@@ -253,11 +242,11 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
   for (const n of nodes) idToName.set(n.id, n.data?.fileName || n.id.slice(0, 12))
   const nameOf = (id: string) => idToName.get(id) || id.slice(0, 12)
 
-  const hm = (config as any).HYBRID_MESH
+  const hm = finalConf.hybridMesh
   const relays: Record<string, Array<{ id: string; name: string }>> = {}   // PUBLIC -> [PRIVATE]
   const proxies: Record<string, Array<{ id: string; name: string }>> = {}  // PUBLIC -> [PRIVATE]
 
-  const collect = (decls: any[], into: Record<string, Array<{ id: string; name: string }>>) => {
+  const collect = (decls: any[] | undefined, into: Record<string, Array<{ id: string; name: string }>>) => {
     for (const d of (decls || [])) {
       if (d.ENABLED === false) continue
       const pub = d.PUBLIC_PEER, priv = d.PRIVATE_PEER
@@ -291,7 +280,17 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
   // falls back to CENTER's host IP (not a gateway); explicit gateway edges
   // carry the domain network. p2pAllowedIPs comes from the rendered config, so
   // no special-casing here.
-  const topo = new TopologyModel(base, config)
+  // TopologyModel needs the topology/global bits (MESH_GROUPS + HYBRID_MESH +
+  // GLOBAL_*); adapt them from finalConf into the SyncConfig shape it expects.
+  const topoConfig = {
+    MESH_GROUPS: finalConf.meshGroups,
+    HYBRID_MESH: finalConf.hybridMesh,
+    GLOBAL_DNS: finalConf.globalDns,
+    GLOBAL_SCRIPTS: finalConf.globalScripts,
+    GLOBAL_LISTEN_PORT: finalConf.globalListenPort,
+    EXTRA_CONFIG: {},
+  } as SyncConfig
+  const topo = new TopologyModel(base, topoConfig)
   const { v4: segV4, v6: segV6 } = topo.getDomainNetworks()
   for (const edge of edges) {
     const ips = edge.data?.p2pAllowedIPs || []
@@ -311,10 +310,10 @@ export function deriveGraphData(base: GraphBase, config: SyncConfig, hiddenGroup
     edges,
     meshGroups,
     globalConfig: {
-      GLOBAL_LISTEN_PORT: config.GLOBAL_LISTEN_PORT,
-      GLOBAL_DNS: config.GLOBAL_DNS,
-      GLOBAL_SCRIPTS: (config.GLOBAL_SCRIPTS || {}) as Record<string, string>,
+      GLOBAL_LISTEN_PORT: finalConf.globalListenPort,
+      GLOBAL_DNS: finalConf.globalDns,
+      GLOBAL_SCRIPTS: (finalConf.globalScripts || {}) as Record<string, string>,
     },
-    config,
+    config: finalConf,
   }
 }

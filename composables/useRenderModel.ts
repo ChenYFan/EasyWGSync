@@ -82,7 +82,7 @@ export function converge(history: FieldHistory, sep: string): Converged {
 // closure / gateway / proxy) happen here; downstream only converge()s.
 // =========================================================================
 
-import type { SyncConfig, DefaultPeerConfig, ScriptType, WGDGlobalDefaults } from '~/types'
+import type { SyncConfig, DefaultPeerConfig, ScriptType, WGDGlobalDefaults, MeshGroup, HybridMesh } from '~/types'
 import type { GraphBase } from '~/composables/useGraphDerive'
 import { TopologyModel } from '~/composables/useTopology'
 
@@ -137,6 +137,42 @@ export interface RenderModel {
   proxyLists: Record<string, string[]>
   /** connection keys that are gateway-declared & read-only, with no underlying conn. */
   connNoUnderlying: Set<string>
+}
+
+/**
+ * The fully-merged final config — the OUTPUT of the render pipeline. Every field
+ * is the converged (default → extra → declaration) final value, NOT a delta.
+ * Consumers (config-generator, deriveGraphData) read these directly; they never
+ * re-read raw .conf or fall back to defaults. This is a DISTINCT type from
+ * SyncConfig.EXTRA_CONFIG (the manual-delta layer) — no shape overloading.
+ */
+export interface FinalConnConfig {
+  allowedIPs: string[]
+  endpoint?: string
+  keepalive?: number | null
+}
+export interface FinalPeerConfig {
+  // Identity (from the default layer / raw .conf — not converged fields).
+  privateKey: string
+  address: string[]
+  // Converged peer-level values (viewer-independent; relay'd IPs in ownAllowedIPs).
+  comments?: string
+  endpoint?: string                       // peer's own endpoint (mesh-peer fallback base)
+  dns?: string
+  listenPort?: number | null
+  ownAllowedIPs: string[]                 // own address + relay'd IPs (declaration append)
+  scripts: Partial<Record<ScriptType, string>>   // incl. GLOBAL_SCRIPTS + proxy block
+  proxyList: string[]                     // proxied source IPs (for ExtraInfo / ewctl)
+  // This peer's view (as viewer) of each connection. key = target pubkey or 'CENTRAL_NODE'.
+  conns: Record<string, FinalConnConfig>
+}
+export interface FinalConf {
+  peers: Record<string, FinalPeerConfig>
+  meshGroups: Record<string, MeshGroup>
+  globalListenPort?: number | null
+  globalDns: boolean
+  globalScripts: Partial<Record<ScriptType, string>>
+  hybridMesh?: HybridMesh
 }
 
 interface BuildCtx {
@@ -403,62 +439,80 @@ function dedupExactCIDRs(list: string[]): string[] {
   return out
 }
 
-export function renderConfig(base: GraphBase, draft: SyncConfig, prebuilt?: RenderModel): SyncConfig {
-  const out: SyncConfig = JSON.parse(JSON.stringify(draft))
-  out.EXTRA_CONFIG = out.EXTRA_CONFIG || {}
+export function renderConfig(base: GraphBase, draft: SyncConfig, prebuilt?: RenderModel): FinalConf {
   const model = prebuilt || buildHistories(base, draft)
+  const defaultOf = (pk: string) => base.basePeers.find(b => b.publicKey === pk)?.default
 
-  // Emits the COMPLETE converged value for every modeled field — not just
-  // deltas. config-generator writes these directly, no fallback to raw .conf.
-  // `@`/empty = inherit accumulated lower layer; converge folds default → extra
-  // → declaration into one final string. `none` = deleted (→ 'none' sentinel).
-  for (const [pk, pf] of Object.entries(model.peers)) {
-    const ec: any = (out.EXTRA_CONFIG[pk] = out.EXTRA_CONFIG[pk] || {})
-
-    const scalar = (field: string, prop: string) => {
-      const h = pf[field]; if (!h) return
-      const f = converge(h, sepOf(field)).final
-      ec[prop] = f === null ? 'none' : f
+  // The merge: every field converged (default → extra → declaration) into its
+  // final value. Output a distinct FinalConf — never the SyncConfig.EXTRA_CONFIG
+  // shape — so consumers read finals directly, never re-reading raw sources.
+  const peers: Record<string, FinalPeerConfig> = {}
+  const peerOf = (pk: string): FinalPeerConfig => {
+    if (!peers[pk]) {
+      const d = defaultOf(pk)
+      peers[pk] = {
+        privateKey: d?.privateKey || '',
+        address: d?.address || [],
+        ownAllowedIPs: [],
+        scripts: {},
+        proxyList: model.proxyLists[pk] || [],
+        conns: {},
+      }
     }
-    scalar('COMMENTS', 'COMMENTS')
-    scalar('ENDPOINT', 'ENDPOINT')
-    scalar('DNS', 'DNS')
+    return peers[pk]
+  }
+
+  for (const [pk, pf] of Object.entries(model.peers)) {
+    const fp = peerOf(pk)
+    const scalar = (field: string): string | undefined => {
+      const h = pf[field]; if (!h) return undefined
+      const f = converge(h, sepOf(field)).final
+      return f === null ? 'none' : f
+    }
+    fp.comments = scalar('COMMENTS')
+    fp.endpoint = scalar('ENDPOINT')
+    fp.dns = scalar('DNS')
     if (pf.LISTEN_PORT) {
       const f = converge(pf.LISTEN_PORT, sepOf('LISTEN_PORT')).final
-      ec.LISTEN_PORT = f ? Number(f) : null
+      fp.listenPort = f ? Number(f) : null
     }
     if (pf.ALLOWED_IPS) {
       const f = converge(pf.ALLOWED_IPS, sepOf('ALLOWED_IPS')).final
-      ec.ALLOWED_IPS = f ? dedupExactCIDRs(f.split(', ')) : ['none']
+      fp.ownAllowedIPs = f ? dedupExactCIDRs(f.split(', ')) : ['none']
     }
     for (const t of SCRIPT_F) {
       const h = pf[t]; if (!h) continue
       const f = converge(h, sepOf(t)).final
-      ec.SCRIPTS = ec.SCRIPTS || {}
-      ec.SCRIPTS[t] = f === null ? 'none' : f
+      fp.scripts[t] = f === null ? 'none' : f
     }
   }
 
   for (const [key, cf] of Object.entries(model.conns)) {
     const [src, p2pKey] = key.split('|')
-    const ec: any = (out.EXTRA_CONFIG[src] = out.EXTRA_CONFIG[src] || {})
-    ec.P2P_CONFIG = ec.P2P_CONFIG || {}
-    const p2p: any = (ec.P2P_CONFIG[p2pKey] = ec.P2P_CONFIG[p2pKey] || {})
+    const conn: FinalConnConfig = { allowedIPs: [] }
     if (cf.ALLOWED_IPS) {
       const f = converge(cf.ALLOWED_IPS, sepOf('ALLOWED_IPS')).final
-      p2p.ALLOWED_IPS = f ? dedupExactCIDRs(f.split(', ')) : ['none']
+      conn.allowedIPs = f ? dedupExactCIDRs(f.split(', ')) : ['none']
     }
     if (cf.ENDPOINT) {
       const f = converge(cf.ENDPOINT, sepOf('ENDPOINT')).final
-      p2p.ENDPOINT = f === null ? 'none' : f
+      conn.endpoint = f === null ? 'none' : f
     }
     if (cf.PERSISTENT_KEEPALIVE) {
       const f = converge(cf.PERSISTENT_KEEPALIVE, sepOf('PERSISTENT_KEEPALIVE')).final
-      p2p.PERSISTENT_KEEPALIVE = f ? Number(f) : null
+      conn.keepalive = f ? Number(f) : null
     }
+    peerOf(src).conns[p2pKey] = conn
   }
 
-  return out
+  return {
+    peers,
+    meshGroups: draft.MESH_GROUPS || {},
+    globalListenPort: draft.GLOBAL_LISTEN_PORT,
+    globalDns: draft.GLOBAL_DNS,
+    globalScripts: draft.GLOBAL_SCRIPTS || {},
+    hybridMesh: draft.HYBRID_MESH,
+  }
 }
 
 // --- live editing: splice the form's extra value into a cached history ---

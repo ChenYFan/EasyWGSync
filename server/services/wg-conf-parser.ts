@@ -116,6 +116,7 @@ export function buildDefaultPeerConfig(
 ): DefaultPeerConfig {
   return {
     publicKey,
+    privateKey: parsed.privateKey,
     fileName,
     isOnline,
     address: parsed.address,

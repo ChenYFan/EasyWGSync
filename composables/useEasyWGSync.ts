@@ -58,8 +58,8 @@ export class EasyWGSyncModel {
     if (edge?.data?.p2pAllowedIPs?.length > 0) {
       return edge.data.p2pAllowedIPs
     }
-    // GLOBAL ALLOWED_IPS: declared by toId to all its peers
-    const globalIPs = this.config?.EXTRA_CONFIG?.[toId]?.ALLOWED_IPS
+    // GLOBAL ALLOWED_IPS: toId's OWN converged AllowedIPs (incl. relay'd IPs)
+    const globalIPs = this.config?.peers?.[toId]?.ownAllowedIPs
     if (globalIPs && globalIPs.length > 0) {
       return [...globalIPs]
     }
@@ -256,7 +256,7 @@ export class EasyWGSyncModel {
     // node. Transitive relay (chain A→B→C) is legitimate, NOT a violation;
     // only count direct relayers (nodes that declare X in a RELAY/flatten-Roaming). ---
     const relayUniqueness: Array<{ node: string; name: string; relayers: Array<{ id: string; name: string }> }> = []
-    const hm = this.config?.HYBRID_MESH
+    const hm = this.config?.hybridMesh
     const relayedNodes = new Set<string>()
     const collectRelayed = (list: any[]) => {
       for (const d of (list || [])) {
