@@ -3,10 +3,12 @@ import { z } from 'zod'
 export const PublicKeySchema = z.string().min(40).max(48)
 
 export const IPCIDRSchema = z.string().min(3)
+/** Either '@' (layer-inherit sentinel) or a CIDR string (≥3 chars). */
+export const IPCIDROrAtSchema = z.union([z.literal('@'), IPCIDRSchema])
 
 export const P2PConfigSchema = z.object({
   ENDPOINT: z.string().optional(),
-  ALLOWED_IPS: z.array(IPCIDRSchema).optional(),
+  ALLOWED_IPS: z.array(IPCIDROrAtSchema).optional(),
   PERSISTENT_KEEPALIVE: z.union([z.number(), z.string()]).optional(),
 })
 
@@ -16,7 +18,7 @@ export const PeerExtraConfigSchema = z.object({
   SCRIPTS: z.record(z.string()).optional(),
   DNS: z.string().optional(),
   LISTEN_PORT: z.number().optional(),
-  ALLOWED_IPS: z.array(IPCIDRSchema).optional(),
+  ALLOWED_IPS: z.array(IPCIDROrAtSchema).optional(),
   P2P_CONFIG: z.record(P2PConfigSchema).optional(),
 })
 
