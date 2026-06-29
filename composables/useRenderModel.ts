@@ -396,6 +396,28 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
     }
   }
 
+  // ---- Connection: plain mesh edges with a manual P2P override (src → tgt) ----
+  // Any EXTRA_CONFIG[src].P2P_CONFIG[tgt] not already modeled as CENTER/gateway
+  // is a per-viewer override on a plain mesh edge. Model it (extra-only — no
+  // default: the consumer merges override ?? the target peer's own value, so
+  // relay'd IPs in tgt.ownAllowedIPs survive when allowedIPs isn't overridden).
+  // Without this, the override lives only in the draft and never reaches
+  // finalConf → the .conf and graph miss it while the panel (live preview) shows it.
+  for (const [src, ec] of Object.entries(EXTRA)) {
+    const p2pAll = (ec as any)?.P2P_CONFIG
+    if (!p2pAll) continue
+    for (const [tgt, p2p] of Object.entries(p2pAll as Record<string, any>)) {
+      if (tgt === 'CENTRAL_NODE') continue
+      const key = `${src}|${tgt}`
+      if (model.conns[key]) continue   // already built (gateway)
+      model.conns[key] = {
+        ENDPOINT: histOf(null, p2p?.ENDPOINT),
+        ALLOWED_IPS: histOf(null, p2p?.ALLOWED_IPS ? p2p.ALLOWED_IPS.join(', ') : undefined),
+        PERSISTENT_KEEPALIVE: histOf(null, p2p?.PERSISTENT_KEEPALIVE != null ? String(p2p.PERSISTENT_KEEPALIVE) : undefined),
+      }
+    }
+  }
+
   return model
 }
 

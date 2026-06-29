@@ -1,0 +1,30 @@
+@layer components {
+
+  /* Section/field label typography (used on label/span/div/summary). */
+  .field-label {
+    @apply text-[10px] uppercase tracking-wider text-muted-foreground;
+  }
+
+  /* Text input / select chrome. Compose width/font: `field-input w-full font-mono`. */
+  .field-input {
+    @apply h-9 px-3 rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring;
+  }
+
+  /* Multiline (script) input chrome. */
+  .field-textarea {
+    @apply px-2 py-1.5 rounded border border-input bg-background text-xs text-foreground font-mono resize-none focus:outline-none focus:ring-1 focus:ring-ring;
+  }
+
+  /* Buttons. Compose extras: `btn-primary disabled:opacity-40`, `btn-danger w-full`. */
+  .btn-primary {
+    @apply h-8 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors;
+  }
+
+  .btn-ghost {
+    @apply h-8 px-3 rounded-md text-sm text-muted-foreground hover:text-foreground transition-colors;
+  }
+
+  .btn-danger {
+    @apply h-8 rounded-md border border-destructive/30 text-xs text-destructive hover:bg-destructive/10 transition-colors;
+  }
+}

@@ -12,6 +12,17 @@ import { resolve } from 'node:path'
 
 process.env.NITRO_PORT ||= String(env.port)
 
+// Own the shutdown at the entry point. Registered BEFORE importing Nitro, so
+// our listener runs first and hard-exits immediately — bypassing Nitro's
+// GracefulShutdown, which would otherwise poll up to NITRO_SHUTDOWN_TIMEOUT
+// (30s) waiting for long-lived peer/panel connections to close on their own,
+// then run another 30s onShutdown timeout. There is nothing to flush here
+// (configs are written synchronously per-request), so an immediate exit is
+// correct and makes Ctrl+C instant.
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.once(sig, () => process.exit(0))
+}
+
 const here = fileURLToPath(new URL('.', import.meta.url))
 const entry = resolve(here, '../.output/server/index.mjs')
 await import(entry)
