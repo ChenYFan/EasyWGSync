@@ -12,7 +12,7 @@
   "author": "CyanFalse",
   "license": "GPL-3.0-or-later",
   "scripts": {
-    "dev": "nuxt dev",
+    "dev": "nuxt dev --no-fork",
     "build": "nuxt build",
     "preview": "nuxt preview",
     "generate": "nuxt generate",

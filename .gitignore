@@ -13,3 +13,4 @@ logs/
 
 # Data (contains topology config)
 data/*
+.claude/*

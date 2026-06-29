@@ -88,12 +88,10 @@ import { TopologyModel } from '~/composables/useTopology'
 
 const SCRIPT_TYPES: ScriptType[] = ['PreUp', 'PostUp', 'PreDown', 'PostDown']
 
-export const PROXY_MARKER = '[EasyWGSync PROXY] source-NAT:'
-
 /**
- * Proxy (NAT) script for the PUBLIC node A. The single source of truth for the
- * proxy iptables block — used by both the renderer (generation) and the panel
- * display, so they never drift.
+ * Proxy (NAT) script for the PUBLIC node A. Generates the MASQUERADE iptables
+ * rules for the proxied source IPs — appended to the node's PostUp/PostDown as
+ * a single line (wg-quick parses PostUp as one value; newlines break it).
  *
  * Forwarding is already permitted by the node's DEFAULT scripts, and the default
  * MASQUERADE (`-s domain ! -d domain`) NATs domain→external while EXEMPTING
@@ -103,25 +101,25 @@ export const PROXY_MARKER = '[EasyWGSync PROXY] source-NAT:'
  * leaving the WG interface, covering the intra-domain case the default skips.
  */
 export function buildProxyScript(proxiedIPs: string[]): { up: string; down: string } {
-  const mark = `# ${PROXY_MARKER}`
   const cmd = (ip: string) => (ip.includes(':') ? 'ip6tables' : 'iptables')
-  // PostUp: add one MASQUERADE rule per proxied source IP (first bring-up).
+  // PostUp: add one MASQUERADE rule per proxied source IP (first bring-up by
+  // wg-quick). Single line — wg-quick parses PostUp as one value, newlines break
+  // it. ewctl (if used) does incremental -A/-D from the ExtraInfo block instead.
   const up = proxiedIPs.map(ip => `${cmd(ip)} -t nat -A POSTROUTING -s ${ip} -o %i -j MASQUERADE`)
-  // PostDown: one-shot clear of every MASQUERADE rule on the %i interface. Lists
-  // the POSTROUTING rules touching %i, flips -A→-D, deletes each. Precise (only
-  // -o %i + MASQUERADE rules) and idempotent — safer than a full nat-table
-  // reload. ewctl does incremental -A/-D between runs; this is the full teardown.
+  // PostDown: one-shot clear of every MASQUERADE rule on the %i interface (wg-quick
+  // down runs this once). Lists POSTROUTING rules touching %i, flips -A→-D, deletes
+  // each. Single line.
   const down = [
     `iptables -t nat -S POSTROUTING | grep -E -- '-o %i ' | grep -E -- '-j MASQUERADE' | sed 's/^-A/-D/' | xargs -r -L1 iptables -t nat`,
     `ip6tables -t nat -S POSTROUTING | grep -E -- '-o %i ' | grep -E -- '-j MASQUERADE' | sed 's/^-A/-D/' | xargs -r -L1 ip6tables -t nat`,
   ]
-  return { up: `${mark}\n${up.join('; ')}`, down: `${mark}\n${down.join('; ')}` }
+  return { up: up.join('; '), down: down.join('; ') }
 }
 
 /** Separator per field for converge() joining. */
 export function sepOf(field: string): string {
   if (field === 'ALLOWED_IPS') return ', '
-  if ((SCRIPT_TYPES as string[]).includes(field)) return '\n'
+  if ((SCRIPT_TYPES as string[]).includes(field)) return '; '
   return ''
 }
 
@@ -386,7 +384,6 @@ function histOf(defaultVal: string | null, extraRaw: string | undefined): FieldH
 // =========================================================================
 
 const SCRIPT_F: ScriptType[] = ['PreUp', 'PostUp', 'PreDown', 'PostDown']
-const hasNonDefault = (h: FieldHistory) => h.some(m => m.layer !== 'default')
 
 /**
  * Drop byte-identical duplicate CIDRs from a final AllowedIPs list, preserving
@@ -411,28 +408,32 @@ export function renderConfig(base: GraphBase, draft: SyncConfig, prebuilt?: Rend
   out.EXTRA_CONFIG = out.EXTRA_CONFIG || {}
   const model = prebuilt || buildHistories(base, draft)
 
+  // Emits the COMPLETE converged value for every modeled field — not just
+  // deltas. config-generator writes these directly, no fallback to raw .conf.
+  // `@`/empty = inherit accumulated lower layer; converge folds default → extra
+  // → declaration into one final string. `none` = deleted (→ 'none' sentinel).
   for (const [pk, pf] of Object.entries(model.peers)) {
     const ec: any = (out.EXTRA_CONFIG[pk] = out.EXTRA_CONFIG[pk] || {})
 
     const scalar = (field: string, prop: string) => {
-      const h = pf[field]; if (!h || !hasNonDefault(h)) return
+      const h = pf[field]; if (!h) return
       const f = converge(h, sepOf(field)).final
       ec[prop] = f === null ? 'none' : f
     }
     scalar('COMMENTS', 'COMMENTS')
     scalar('ENDPOINT', 'ENDPOINT')
     scalar('DNS', 'DNS')
-    if (pf.LISTEN_PORT && hasNonDefault(pf.LISTEN_PORT)) {
-      const f = converge(pf.LISTEN_PORT, '').final
-      if (f) ec.LISTEN_PORT = Number(f)
+    if (pf.LISTEN_PORT) {
+      const f = converge(pf.LISTEN_PORT, sepOf('LISTEN_PORT')).final
+      ec.LISTEN_PORT = f ? Number(f) : null
     }
-    if (pf.ALLOWED_IPS && hasNonDefault(pf.ALLOWED_IPS)) {
-      const f = converge(pf.ALLOWED_IPS, ', ').final
+    if (pf.ALLOWED_IPS) {
+      const f = converge(pf.ALLOWED_IPS, sepOf('ALLOWED_IPS')).final
       ec.ALLOWED_IPS = f ? dedupExactCIDRs(f.split(', ')) : ['none']
     }
     for (const t of SCRIPT_F) {
-      const h = pf[t]; if (!h || !hasNonDefault(h)) continue
-      const f = converge(h, '\n').final
+      const h = pf[t]; if (!h) continue
+      const f = converge(h, sepOf(t)).final
       ec.SCRIPTS = ec.SCRIPTS || {}
       ec.SCRIPTS[t] = f === null ? 'none' : f
     }
@@ -443,18 +444,17 @@ export function renderConfig(base: GraphBase, draft: SyncConfig, prebuilt?: Rend
     const ec: any = (out.EXTRA_CONFIG[src] = out.EXTRA_CONFIG[src] || {})
     ec.P2P_CONFIG = ec.P2P_CONFIG || {}
     const p2p: any = (ec.P2P_CONFIG[p2pKey] = ec.P2P_CONFIG[p2pKey] || {})
-    const aH = cf.ALLOWED_IPS
-    if (aH && (p2pKey === 'CENTRAL_NODE' || hasNonDefault(aH))) {
-      const f = converge(aH, ', ').final
+    if (cf.ALLOWED_IPS) {
+      const f = converge(cf.ALLOWED_IPS, sepOf('ALLOWED_IPS')).final
       p2p.ALLOWED_IPS = f ? dedupExactCIDRs(f.split(', ')) : ['none']
     }
-    if (cf.ENDPOINT && hasNonDefault(cf.ENDPOINT)) {
-      const f = converge(cf.ENDPOINT, '').final
+    if (cf.ENDPOINT) {
+      const f = converge(cf.ENDPOINT, sepOf('ENDPOINT')).final
       p2p.ENDPOINT = f === null ? 'none' : f
     }
-    if (cf.PERSISTENT_KEEPALIVE && hasNonDefault(cf.PERSISTENT_KEEPALIVE)) {
-      const f = converge(cf.PERSISTENT_KEEPALIVE, '').final
-      if (f) p2p.PERSISTENT_KEEPALIVE = Number(f)
+    if (cf.PERSISTENT_KEEPALIVE) {
+      const f = converge(cf.PERSISTENT_KEEPALIVE, sepOf('PERSISTENT_KEEPALIVE')).final
+      p2p.PERSISTENT_KEEPALIVE = f ? Number(f) : null
     }
   }
 

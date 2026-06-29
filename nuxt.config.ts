@@ -35,6 +35,11 @@ export default defineNuxtConfig({
 
   nitro: {
     preset: 'node-server',
+    // BigInt literals (used in IPv6 128-bit math) need es2020+; the default
+    // esbuild target warns at es2019.
+    esbuild: {
+      options: { target: 'es2020' },
+    },
     experimental: {
       openAPI: true,
     },
@@ -48,6 +53,13 @@ export default defineNuxtConfig({
       // non-API routes.
       route: '/_openapi-raw',
     },
+  },
+
+  // BigInt literals (IPv6 math) need es2020+ on the client build too.
+  vite: {
+    build: { target: 'es2020' },
+    esbuild: { target: 'es2020' },
+    optimizeDeps: { esbuildOptions: { target: 'es2020' } },
   },
 
   app: {

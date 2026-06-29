@@ -5,16 +5,44 @@ import { parsePeerConf, buildDefaultPeerConfig } from './wg-conf-parser'
 import { getConfigMtime } from './storage'
 import { createLogger } from '../utils/logger'
 import { renderConfig, buildHistories } from '~/composables/useRenderModel'
-import type { SyncConfig } from '~/types'
+import type { SyncConfig, ScriptType } from '~/types'
 import type { GraphBase } from '~/composables/useGraphDerive'
 
 const log = createLogger('ConfigGenerator')
+
+const SCRIPT_TYPES: ScriptType[] = ['PreUp', 'PostUp', 'PreDown', 'PostDown']
+
+// Parse a raw .conf text (the CENTER wg0.conf) into per-peer [Peer] blocks,
+// keyed by PublicKey. Used to source mesh peers' PublicKey + default fields.
+function parseRawPeers(rawConf: string): Record<string, Record<string, string>> {
+  const out: Record<string, Record<string, string>> = {}
+  let section: 'interface' | 'peer' | null = null
+  let cur: Record<string, string> | null = null
+  for (const raw of rawConf.split('\n')) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#') || line.startsWith(';')) continue
+    const sec = line.match(/^\[(.+)\]$/)
+    if (sec) {
+      if (cur && section === 'peer' && cur.PublicKey) out[cur.PublicKey] = cur
+      section = sec[1].toLowerCase() === 'peer' ? 'peer' : 'interface'
+      cur = section === 'peer' ? {} : null
+      continue
+    }
+    if (section !== 'peer' || !cur) continue
+    const eq = line.indexOf('=')
+    if (eq === -1) continue
+    const key = line.slice(0, eq).trim().replace(/\s+/g, '')
+    const val = line.slice(eq + 1).trim()
+    if (key && val) cur[key] = val
+  }
+  if (cur && section === 'peer' && cur.PublicKey) out[cur.PublicKey] = cur
+  return out
+}
 
 export async function generatePeerConfig(peerName: string, overrideConfig?: SyncConfig): Promise<string> {
   const config = useRuntimeConfig()
   const rawConfig = overrideConfig || await configService.getAll()
 
-  // Build base data for HYBRID_MESH rendering (need peer IP mapping).
   const [wgPeersResult, onlineResult, globalDefaultsResult, interfaceResult, rawResult] = await Promise.all([
     fetchAllPeers().catch(() => [] as Awaited<ReturnType<typeof fetchAllPeers>>),
     getShowEndpoints(config.wireguardConfigName).catch(() => ({} as Record<string, string>)),
@@ -27,7 +55,6 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
   const onlineEndpoints = onlineResult
   const globalDefaults = globalDefaultsResult
 
-  // Derive CENTER pubkey (prefer structured interface PublicKey).
   let centerPubKey = interfaceResult?.PublicKey || ''
   if (!centerPubKey && rawResult) {
     const privKeyMatch = rawResult.match(/PrivateKey\s*=\s*(.+)/)
@@ -59,263 +86,117 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
     globalDefaults,
   }
 
-  // Render the draft into concrete EXTRA_CONFIG values — ONE render path
-  // (buildHistories + converge), shared with the frontend graph. Also keep the
-  // model to surface the proxy list (JSON comment block for ewctl).
   const model = buildHistories(base, rawConfig)
   const env = renderConfig(base, rawConfig, model)
 
   const peerData = wgPeers.find(p => p.fileName === peerName)
   if (!peerData?.file) return ''
 
-  let result = peerData.file
-
   const parsedPeer = parsePeerConf(peerData.file)
   if (!parsedPeer.privateKey) return ''
-  const PriKey = parsedPeer.privateKey
-  const PubKey = await derivePubKey(PriKey)
-  if (!PubKey) return ''
+  const priKey = parsedPeer.privateKey
+  const pubKey = await derivePubKey(priKey)
+  if (!pubKey) return ''
 
-  result = '# ===EasyWGSync托管，以下为原始配置=== #\n' + result
+  const extra = env.EXTRA_CONFIG?.[pubKey] || {}
+  const p2p = extra.P2P_CONFIG || {}
 
-  // GLOBAL_DNS: comment out DNS if disabled
-  if (!env.GLOBAL_DNS) {
-    result = result.replace(/DNS \=/, '# DNS =')
-  }
+  // ===== 第一段: [Interface] + CENTER [Peer] =====
+  // renderConfig already converged default + extra + declaration into final
+  // values in `extra`. config-generator writes them directly — no fallback.
+  const lines: string[] = ['[Interface]']
 
-  // GLOBAL_LISTEN_PORT: override ListenPort
-  if (env.GLOBAL_LISTEN_PORT) {
-    result = result
-      .replace(/^ListenPort \= .+/m, '')
-      .replace(/\[Interface\]/, match => `[Interface]\nListenPort = ${env.GLOBAL_LISTEN_PORT}`)
-  }
+  // PrivateKey + Address: not modeled as field histories (raw .conf identity).
+  lines.push(`PrivateKey = ${priKey}`)
+  if (parsedPeer.address.length) lines.push(`Address = ${parsedPeer.address.join(', ')}`)
 
-  // GLOBAL_SCRIPTS: comment originals, insert new ones before [Peer]
-  if (env.GLOBAL_SCRIPTS && Object.keys(env.GLOBAL_SCRIPTS).length > 0) {
-    result = result.replace(
-      /^(PreUp|PostUp|PreDown|PostDown) \= .+/g,
-      match => `# 以下配置被EasyWGSync(Global)禁用 ${match}`
-    )
-    for (const scriptType in env.GLOBAL_SCRIPTS) {
-      const scriptContent = (env.GLOBAL_SCRIPTS as Record<string, string>)[scriptType]
-      if (scriptContent && scriptContent.trim() !== '') {
-        result = result.replace(/\[Peer\]/, match => `${scriptType} = ${scriptContent}\n${match}`)
-      }
+  // ListenPort (converged — includes GLOBAL_LISTEN_PORT override)
+  if (extra.LISTEN_PORT != null) lines.push(`ListenPort = ${extra.LISTEN_PORT}`)
+
+  // DNS (converged — GLOBAL_DNS false → 'none' sentinel → omit; else final value)
+  if (extra.DNS && extra.DNS !== 'none') lines.push(`DNS = ${extra.DNS}`)
+
+  // Scripts (converged — includes GLOBAL_SCRIPTS + proxy declaration + default)
+  const scripts = extra.SCRIPTS || {}
+  for (const t of SCRIPT_TYPES) {
+    const content = scripts[t]
+    if (content != null && content !== 'none' && content.trim() !== '') {
+      lines.push(`${t} = ${content}`)
     }
   }
 
-  // EXTRA_CONFIG for this peer
-  if (env.EXTRA_CONFIG && PubKey in env.EXTRA_CONFIG) {
-    const extraConfig = env.EXTRA_CONFIG[PubKey]
-
-    if (extraConfig.COMMENTS && extraConfig.COMMENTS.trim() !== '') {
-      result = result.replace(/\[Peer\]/, match => `# 本节点注释：${extraConfig.COMMENTS}\n${match}`)
+  // [Peer] — CENTER (from converged P2P_CONFIG.CENTRAL_NODE)
+  if (centerPubKey && p2p.CENTRAL_NODE) {
+    const central = p2p.CENTRAL_NODE
+    lines.push('', '[Peer]')
+    if (extra.COMMENTS && extra.COMMENTS !== 'none') lines.push(`#Comments = ${extra.COMMENTS}`)
+    lines.push(`PublicKey = ${centerPubKey}`)
+    if (central.ALLOWED_IPS && central.ALLOWED_IPS.length && !(central.ALLOWED_IPS.length === 1 && central.ALLOWED_IPS[0] === 'none')) {
+      lines.push(`AllowedIPs = ${central.ALLOWED_IPS.join(', ')}`)
     }
-
-    // Per-peer scripts override
-    if (extraConfig.SCRIPTS) {
-      for (const scriptType in extraConfig.SCRIPTS) {
-        let scriptContent = extraConfig.SCRIPTS[scriptType as keyof typeof extraConfig.SCRIPTS]
-        if (scriptContent && scriptContent.trim() !== '') {
-          if (scriptContent.indexOf('$GLOBAL') !== -1) {
-            scriptContent = scriptContent.replace(
-              /\$GLOBAL/g,
-              (env.GLOBAL_SCRIPTS as Record<string, string>)[scriptType] || ''
-            )
-          }
-          result = result.replace(
-            new RegExp(`^(${scriptType}) \\= .+`, 'gm'),
-            match => `# 以下配置被EasyWGSync(Peer)禁用 ${match}`
-          )
-          if (scriptContent !== 'none') {
-            result = result.replace(/\[Peer\]/, match => `${scriptType} = ${scriptContent}\n${match}`)
-          }
-        }
-      }
+    if (central.ENDPOINT && central.ENDPOINT !== 'none') {
+      lines.push(`Endpoint = ${central.ENDPOINT}`)
     }
-
-    // Per-peer DNS（none = 显式删除该行，用系统默认）
-    if (extraConfig.DNS) {
-      result = result.replace(/^(DNS) \= .+/m, match => `# 以下配置被EasyWGSync(Peer)禁用 ${match}`)
-      if (extraConfig.DNS !== 'none') {
-        result = result.replace(/\[Interface\]/, match => `[Interface]\nDNS = ${extraConfig.DNS}`)
-      }
-    }
-
-    // Per-peer ListenPort
-    if (extraConfig.LISTEN_PORT) {
-      result = result
-        .replace(/^ListenPort \= .+/m, match => `# 以下配置被EasyWGSync(Peer)禁用 ${match}`)
-        .replace(/\[Interface\]/, match => `[Interface]\nListenPort = ${extraConfig.LISTEN_PORT}`)
-    }
-
-    // CENTRAL_NODE P2P config
-    if (extraConfig.P2P_CONFIG?.['CENTRAL_NODE']) {
-      const centralNodeConfig = extraConfig.P2P_CONFIG['CENTRAL_NODE']
-      if (centralNodeConfig.ALLOWED_IPS) {
-        const aip = centralNodeConfig.ALLOWED_IPS
-        if (aip.length === 1 && aip[0] === 'none') {
-          // none = 删除 AllowedIPs 行
-          result = result.replace(/^AllowedIPs \= .+/m, match => `# 以下配置被EasyWGSync(Peer)禁用 ${match}`)
-        } else {
-          result = result.replace(/AllowedIPs \= .+/, `AllowedIPs = ${aip.join(', ')}`)
-        }
-      }
-      if (centralNodeConfig.ENDPOINT === 'none') {
-        result = result.replace(/Endpoint \= .+/, match => `# 以下配置被EasyWGSync(Peer)禁用 ${match}`)
-      } else if (centralNodeConfig.ENDPOINT) {
-        result = result.replace(/Endpoint \= .+/, `Endpoint = ${centralNodeConfig.ENDPOINT}`)
-      }
-      if (centralNodeConfig.PERSISTENT_KEEPALIVE === 'none') {
-        result = result.replace(/PersistentKeepalive \= .+/, match => `# 以下配置被EasyWGSync(Peer)禁用 ${match}`)
-      } else if (centralNodeConfig.PERSISTENT_KEEPALIVE) {
-        result = result.replace(/PersistentKeepalive \= .+/, `PersistentKeepalive = ${centralNodeConfig.PERSISTENT_KEEPALIVE}`)
-      }
+    if (central.PERSISTENT_KEEPALIVE != null && String(central.PERSISTENT_KEEPALIVE) !== 'none') {
+      lines.push(`PersistentKeepalive = ${central.PERSISTENT_KEEPALIVE}`)
     }
   }
 
-  // Section divider — emitted into the .conf output.
-  result += '\n\n# ===以上为原始配置，接下来为P2P网络(MeshGroup)节点配置=== #\n'
-
-  let RawWGConfigLines = rawResult.split('\n')
-  const peerStartIdx = RawWGConfigLines.findIndex(line => line.startsWith('[Peer]'))
-  if (peerStartIdx === -1) {
-    return result + '\n# ===EasyWGSync托管，P2P配置结束=== #\n'
-  }
-  RawWGConfigLines = RawWGConfigLines.slice(peerStartIdx)
-
-  const RawPeerConfigs: Record<string, Record<string, string>> = {}
-  const PeerIndices: number[] = []
-  RawWGConfigLines.forEach((line, index) => {
-    if (line.startsWith('[Peer]')) PeerIndices.push(index)
-  })
-  PeerIndices.push(RawWGConfigLines.length)
-
-  for (let i = 0; i < PeerIndices.length - 1; i++) {
-    const peerConfigLines = RawWGConfigLines.slice(PeerIndices[i] + 1, PeerIndices[i + 1])
-    const currentPeer: Record<string, string> = {}
-    let currentPeerPubKey: string | null = null
-    peerConfigLines.forEach(line => {
-      const parts = line.split(' = ')
-      if (parts.length < 2) return
-      const key = parts[0].trim()
-      const value = parts.slice(1).join(' = ').trim()
-      if (!key || !value) return
-      currentPeer[key] = value
-      if (key === 'PublicKey') currentPeerPubKey = value
-    })
-    if (currentPeerPubKey) RawPeerConfigs[currentPeerPubKey] = currentPeer
-  }
-
-  // 1. Online endpoints
-  const OnlineEndpoints = onlineEndpoints
-  for (const OnlineEndpointPubKey in OnlineEndpoints) {
-    if (RawPeerConfigs[OnlineEndpointPubKey]) {
-      RawPeerConfigs[OnlineEndpointPubKey].Endpoint = OnlineEndpoints[OnlineEndpointPubKey]
-    }
-  }
-
-  // 2.1 Apply EXTRA_CONFIG to all peers (skip self)
-  for (const PeerPubKey in env.EXTRA_CONFIG) {
-    if (PeerPubKey === PubKey) continue
-    if (!RawPeerConfigs[PeerPubKey]) continue
-
-    RawPeerConfigs[PeerPubKey]['#Comments'] = env.EXTRA_CONFIG[PeerPubKey]?.COMMENTS || ''
-
-    if (env.EXTRA_CONFIG[PeerPubKey].ENDPOINT === 'none') {
-      delete RawPeerConfigs[PeerPubKey].Endpoint
-    } else if (env.EXTRA_CONFIG[PeerPubKey].ENDPOINT) {
-      RawPeerConfigs[PeerPubKey].Endpoint = env.EXTRA_CONFIG[PeerPubKey].ENDPOINT!
-    }
-
-    // ALLOWED_IPS（['none'] = 删除该 key）
-    const gAip = env.EXTRA_CONFIG[PeerPubKey].ALLOWED_IPS
-    if (gAip) {
-      if (gAip.length === 1 && gAip[0] === 'none') {
-        delete RawPeerConfigs[PeerPubKey].AllowedIPs
-      } else {
-        RawPeerConfigs[PeerPubKey].AllowedIPs = gAip.join(', ')
-      }
-    }
-  }
-
-  // 2.1b Apply own P2P_CONFIG (this peer's view of other peers)
-  if (PubKey in env.EXTRA_CONFIG && env.EXTRA_CONFIG[PubKey].P2P_CONFIG) {
-    for (const PeerPubKey in env.EXTRA_CONFIG[PubKey].P2P_CONFIG) {
-      if (PeerPubKey === PubKey || PeerPubKey === 'CENTRAL_NODE') continue
-      if (!RawPeerConfigs[PeerPubKey]) continue
-
-      const p2pConfig = env.EXTRA_CONFIG[PubKey].P2P_CONFIG![PeerPubKey]
-
-      if (p2pConfig.ENDPOINT === 'none') {
-        delete RawPeerConfigs[PeerPubKey].Endpoint
-      } else if (p2pConfig.ENDPOINT) {
-        RawPeerConfigs[PeerPubKey].Endpoint = p2pConfig.ENDPOINT
-      }
-
-      if (p2pConfig.ALLOWED_IPS) {
-        const pAip = p2pConfig.ALLOWED_IPS
-        if (pAip.length === 1 && pAip[0] === 'none') {
-          delete RawPeerConfigs[PeerPubKey].AllowedIPs
-        } else {
-          RawPeerConfigs[PeerPubKey].AllowedIPs = pAip.join(', ')
-        }
-      }
-
-      RawPeerConfigs[PeerPubKey].PersistentKeepalive = p2pConfig.PERSISTENT_KEEPALIVE
-        ? String(p2pConfig.PERSISTENT_KEEPALIVE)
-        : '21'
-    }
-  }
-
-  // 2.2 Process MESH_GROUPS (skip disabled groups — keep members but no peer connections)
-  const MeshPeers = new Set<string>()
-  for (const meshGroupName in env.MESH_GROUPS) {
-    const meshGroup = env.MESH_GROUPS[meshGroupName]
-    // Support both new {PEERS,ENABLED} and legacy string[] shapes
-    const members = Array.isArray(meshGroup) ? meshGroup : (meshGroup as any).PEERS
-    const enabled = Array.isArray(meshGroup) ? true : (meshGroup as any).ENABLED !== false
+  // ===== 第二段: mesh [Peer] (fully generated by us) =====
+  // Mesh peers' PublicKey + default AllowedIPs come from the CENTER wg0.conf
+  // (rawPeers) — they're not in the converge model. Per-peer overrides come
+  // from the converged P2P_CONFIG in `extra` (this peer's view of each peer).
+  const rawPeers = rawResult ? parseRawPeers(rawResult) : {}
+  const meshPeers = new Set<string>()
+  for (const [name, group] of Object.entries(env.MESH_GROUPS || {})) {
+    const members = Array.isArray(group) ? group : (group as any).PEERS
+    const enabled = Array.isArray(group) ? true : (group as any).ENABLED !== false
     if (!enabled) continue
-    if (members.includes(PubKey)) {
-      members.forEach((peerPubKey: string) => {
-        if (peerPubKey !== PubKey) {
-          if (!RawPeerConfigs[peerPubKey]) return
-          if (!RawPeerConfigs[peerPubKey]['#Groups']) RawPeerConfigs[peerPubKey]['#Groups'] = ''
-          RawPeerConfigs[peerPubKey]['#Groups'] += meshGroupName + ' '
-          MeshPeers.add(peerPubKey)
-        }
-      })
+    if (members.includes(pubKey)) {
+      for (const peerPubKey of members) {
+        if (peerPubKey === pubKey || !rawPeers[peerPubKey]) continue
+        meshPeers.add(peerPubKey)
+      }
     }
   }
 
-  // 2.3 Default PersistentKeepalive for mesh peers
-  for (const peerPubKey of MeshPeers) {
-    if (!RawPeerConfigs[peerPubKey]?.PersistentKeepalive) {
-      RawPeerConfigs[peerPubKey].PersistentKeepalive = '21'
+  for (const peerPubKey of meshPeers) {
+    const rawPeer = rawPeers[peerPubKey]
+    const peerP2p = extra.P2P_CONFIG?.[peerPubKey]   // this peer's converged view of that peer
+    const peerExtra = env.EXTRA_CONFIG?.[peerPubKey] || {}
+
+    lines.push('', '[Peer]')
+    if (peerExtra.COMMENTS && peerExtra.COMMENTS !== 'none') lines.push(`#Comments = ${peerExtra.COMMENTS}`)
+    lines.push(`PublicKey = ${peerPubKey}`)
+
+    // AllowedIPs: converged P2P_CONFIG overrides; default = peer's own address from CENTER .conf
+    const aip = peerP2p?.ALLOWED_IPS
+    if (aip && aip.length && !(aip.length === 1 && aip[0] === 'none')) {
+      lines.push(`AllowedIPs = ${aip.join(', ')}`)
+    } else if (rawPeer.AllowedIPs) {
+      lines.push(`AllowedIPs = ${rawPeer.AllowedIPs}`)
     }
+
+    // Endpoint: converged P2P_CONFIG overrides; default = online endpoint
+    const ep = peerP2p?.ENDPOINT
+    if (ep && ep !== 'none') {
+      lines.push(`Endpoint = ${ep}`)
+    } else if (onlineEndpoints[peerPubKey]) {
+      lines.push(`Endpoint = ${onlineEndpoints[peerPubKey]}`)
+    } else if (rawPeer.Endpoint) {
+      lines.push(`Endpoint = ${rawPeer.Endpoint}`)
+    }
+
+    // PersistentKeepalive: converged P2P_CONFIG or default 21
+    const ka = peerP2p?.PERSISTENT_KEEPALIVE
+    lines.push(`PersistentKeepalive = ${ka != null && String(ka) !== 'none' ? ka : 21}`)
   }
 
-  // 3. Append mesh peer configs to result
-  for (const peerPubKey of MeshPeers) {
-    const peerConfig = RawPeerConfigs[peerPubKey]
-    if (!peerConfig) continue
-    result += `\n[Peer]\n`
-    for (const key in peerConfig) {
-      result += `${key} = ${peerConfig[key]}\n`
-    }
-  }
-
-  result += '\n# ===EasyWGSync托管，P2P配置结束=== #\n'
-
-  // Append a single ExtraInfo JSON comment block at the end. ewctl reads this
-  // for: the proxy list (source IPs to MASQUERADE — diffed against live
-  // iptables for incremental -A/-D) and savedAt (config version timestamp —
-  // skip a no-op sync when unchanged). wg-quick ignores '#' comment lines, so
-  // this never affects WireGuard itself.
-  const proxied = model.proxyLists[PubKey] || []
+  // ===== ExtraInfo (proxy list + savedAt, for ewctl) =====
+  const proxied = model.proxyLists[pubKey] || []
   const savedAt = await getConfigMtime()
-  const extra = JSON.stringify({ proxied, savedAt })
-  result += `\n#===EASYWGSYNC_EXTRA_START===#\n#${extra}\n#===EASYWGSYNC_EXTRA_END===#\n`
+  const extraInfo = JSON.stringify({ proxied, savedAt })
+  lines.push('', `#===EASYWGSYNC_EXTRA_START===#`, `#${extraInfo}`, `#===EASYWGSYNC_EXTRA_END===#`)
 
-  return result
+  return lines.join('\n') + '\n'
 }
