@@ -6,6 +6,6 @@
 
 <script setup lang="ts">
 useHead({
-  htmlAttrs: { class: 'dark' },
+  // htmlAttrs: { class: 'dark' }, //DO NOT DARK DEFAULT
 })
 </script>

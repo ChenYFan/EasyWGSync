@@ -190,14 +190,22 @@ export class TopologyModel {
 
   /**
    * Does the pair (a, b) have an underlying direct connection?
-   * Same enabled mesh group, or a manual P2P_CONFIG entry between them.
+   * Same enabled mesh group ONLY. Per meshgroup-design-philosophy: only a
+   * MeshGroup builds a connection; P2P_CONFIG is a per-viewer field override
+   * on an existing edge and does NOT establish or revive connectionality
+   * ("不建组可以允许存在关系——但是不会生效"). A P2P_CONFIG entry alone must not
+   * count as a connection — otherwise declarations could attach to an edge that
+   * exists neither on the canvas (deriveGraphData draws edges from MeshGroups)
+   * nor in the .conf (config-generator emits [Peer] only from mesh members).
    */
   hasUnderlyingConnection(a: string, b: string): boolean {
     return this.classifyConnection(a, b) === 'enabled'
   }
 
   /**
-   * Classify connection: enabled (same enabled group or P2P) / disabled (same group but disabled) / none.
+   * Classify connection: enabled (same enabled group) / disabled (same group but
+   * disabled) / none (no shared group). P2P_CONFIG is intentionally NOT consulted
+   * — it overrides edge fields, never creates the edge itself.
    */
   classifyConnection(a: string, b: string): 'enabled' | 'disabled' | 'none' {
     let inDisabled = false
@@ -207,7 +215,6 @@ export class TopologyModel {
         inDisabled = true
       }
     }
-    if (this.config.EXTRA_CONFIG?.[a]?.P2P_CONFIG?.[b]) return 'enabled'
     return inDisabled ? 'disabled' : 'none'
   }
 
