@@ -1,9 +1,5 @@
-// Pure derivation: read-only base data + an editable config => full graph data
-// (nodes / edges / mesh groups incl. virtual CENTER_GROUP & ORPHAN_GROUP).
-//
-// This is the exact logic that used to live in server/api/admin/graph.get.ts,
-// moved client-side so the draft can recompute the graph instantly without
-// hitting the backend. Output shape matches what EasyWGSyncModel / panels expect.
+// Derive the full graph (nodes/edges/meshGroups) from base data + FinalConf.
+// Runs client-side so the draft recomputes instantly without hitting the backend.
 
 import type { SyncConfig, DefaultPeerConfig, WGDInterfaceInfo, WGDGlobalDefaults } from '~/types'
 import type { FinalConf } from '~/composables/useRenderModel'
@@ -31,11 +27,11 @@ export interface DerivedGraph {
   config: FinalConf
 }
 
-/** A converged sentinel-aware string: 'none' (deleted) and '' → undefined. */
+/** Converged sentinel-aware string: 'none' + '' → undefined. */
 function realStr(v: string | undefined): string | undefined {
   return v && v !== 'none' ? v : undefined
 }
-/** A converged AllowedIPs list, dropping the ['none'] deleted sentinel. */
+/** Converged AllowedIPs list, dropping the ['none'] sentinel. */
 function realIPs(v: string[] | undefined): string[] {
   if (!v || (v.length === 1 && v[0] === 'none')) return []
   return v
@@ -50,12 +46,9 @@ export function deriveGraphData(base: GraphBase, finalConf: FinalConf, hiddenGro
   const nodes: any[] = []
   const knownPubKeys = new Set<string>()
 
-  // CENTER node first
+  // CENTER node: real interface address + listen port from interfaceInfo.
   if (centerPubKey) {
     knownPubKeys.add(centerPubKey)
-    // CENTER's real interface address + listen port come from WGDashboard's
-    // interfaceInfo (it has no peer .conf). Endpoint falls back to the listen
-    // port when no explicit host endpoint is reported.
     const ifAddr = base.interfaceInfo?.Address?.trim()
     const ifPort = base.interfaceInfo?.ListenPort
     nodes.push({
@@ -185,12 +178,8 @@ export function deriveGraphData(base: GraphBase, finalConf: FinalConf, hiddenGro
   }
 
   // CENTER edges: bidirectional.
-  //  - peer→center (isToCenter): editable, config stored in P2P_CONFIG.CENTRAL_NODE
-  //  - center→peer (isFromCenter): read-only
-  // Both share CENTER_GROUP; skip entirely if CENTER_GROUP is hidden.
-  // p2pAllowedIPs comes from the RENDERED config (renderConfig materializes the
-  // implicit center-gateway /24 or the demoted /32 into CENTRAL_NODE.ALLOWED_IPS),
-  // so the GW marker reflects the virtual-gateway state without special-casing.
+  // peer→center (isToCenter): editable, stored in P2P_CONFIG.CENTRAL_NODE
+  // center→peer (isFromCenter): read-only
   if (centerPubKey && !hiddenGroups?.has('CENTER_GROUP')) {
     for (const peerKey of allPeerKeys) {
       const centralP2p = PEERS[peerKey]?.conns?.['CENTRAL_NODE']
@@ -235,9 +224,7 @@ export function deriveGraphData(base: GraphBase, finalConf: FinalConf, hiddenGro
     }
   }
 
-  // === Relay / Proxy identification (from HYBRID_MESH intent) ===
-  // Read declarations directly from HYBRID_MESH (accurate — distinguishes
-  // Relay vs Proxy, and isn't confused by manual ALLOWED_IPS edits).
+  // Relay / Proxy identification from HYBRID_MESH intent.
   const idToName = new Map<string, string>()
   for (const n of nodes) idToName.set(n.id, n.data?.fileName || n.id.slice(0, 12))
   const nameOf = (id: string) => idToName.get(id) || id.slice(0, 12)
@@ -271,17 +258,7 @@ export function deriveGraphData(base: GraphBase, finalConf: FinalConf, hiddenGro
     n.data.proxies = proxies[n.id] || []
   }
 
-  // === Gateway identification (edge-as-fact) ===
-  // A gateway edge is one whose rendered p2pAllowedIPs contains the whole
-  // domain network (v4 and/or v6, prefix derived by TopologyModel). This
-  // reflects the virtual-gateway model: default X→CENTER has the domain network
-  // stacked by the implicit center-gateway declaration (gateway); when X
-  // explicitly roams via another exit that declaration is dropped and X→CENTER
-  // falls back to CENTER's host IP (not a gateway); explicit gateway edges
-  // carry the domain network. p2pAllowedIPs comes from the rendered config, so
-  // no special-casing here.
-  // TopologyModel needs the topology/global bits (MESH_GROUPS + HYBRID_MESH +
-  // GLOBAL_*); adapt them from finalConf into the SyncConfig shape it expects.
+  // Gateway identification: edge is gateway iff p2pAllowedIPs contains whole domain network.
   const topoConfig = {
     MESH_GROUPS: finalConf.meshGroups,
     HYBRID_MESH: finalConf.hybridMesh,
@@ -297,9 +274,7 @@ export function deriveGraphData(base: GraphBase, finalConf: FinalConf, hiddenGro
     edge.data.isGateway = ips.some((ip: string) => ip === segV4 || ip === segV6)
   }
 
-  // Stamp CENTER's real own IP(s) onto the CENTER node (display address stays
-  // 'ALL'). Single source for graph-side consumers (findNodeByIp, the CENTER
-  // routing table) so none of them re-derive it. From interfaceInfo.Address.
+  // Stamp CENTER's own IP(s) for graph-side consumers.
   if (centerPubKey) {
     const centerNode = nodes.find((n: any) => n.data?.isCenter)
     if (centerNode) centerNode.data.ownIPs = topo.getCenterOwnIPs()

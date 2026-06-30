@@ -1,9 +1,6 @@
-// Centralized config service: the single entry point for all reads/writes
-// against data/config.json. API handlers call these methods instead of
-// touching storage / config shape directly.
-//
-// Input validation (zod) stays in the route handlers; this layer owns the
-// business logic: conflict checks, read-modify-write, and shaping responses.
+// Centralized config service: reads/writes against data/config.json.
+// Business logic (conflict checks, read-modify-write, response shaping) lives here.
+// Validation (zod) stays in route handlers.
 
 import { readSyncConfig, updateSyncConfig } from './storage'
 import type { SyncConfig, PeerExtraConfig, P2PConfig } from '~/types'

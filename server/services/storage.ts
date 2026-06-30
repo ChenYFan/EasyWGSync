@@ -23,6 +23,8 @@ const DEFAULT_CONFIG: SyncConfig = {
 let lockHolder: ReturnType<typeof setTimeout> | null = null
 
 async function acquireLock(timeoutMs = 5000): Promise<void> {
+  // Ensure DATA_DIR exists before writing lock file.
+  await mkdir(DATA_DIR, { recursive: true })
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     try {
@@ -49,10 +51,8 @@ async function releaseLock(): Promise<void> {
 }
 
 /**
- * The config.json file's last-modified time (ms since epoch). Used as the
- * "config version" written into each peer .conf so ewctl can skip re-applying
- * when the version is unchanged since its last sync. Reflects any write
- * (commit / global / peer / p2p / mesh-group) since all go through config.json.
+ * config.json last-modified time. Used as config version in each peer .conf
+ * so ewctl can skip re-apply when unchanged.
  */
 export async function getConfigMtime(): Promise<number> {
   try {
@@ -77,8 +77,6 @@ export async function readSyncConfig(): Promise<SyncConfig> {
 
 export async function writeSyncConfig(config: SyncConfig): Promise<void> {
   const validated = SyncConfigSchema.parse(config)
-  await mkdir(DATA_DIR, { recursive: true })
-
   const tmpFile = join(DATA_DIR, `.config-${randomBytes(8).toString("hex")}.tmp`)
 
   await acquireLock()

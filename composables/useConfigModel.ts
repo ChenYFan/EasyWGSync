@@ -1,23 +1,14 @@
-// composables/useConfigModel.ts
+// Three-layer config model for Peer/Connection editing.
 //
-// Three-layer config model for Peer/Connection editing (defaultConf / extraConf
-// / declarationConf). See mem `peer-connection-three-layer-model`.
+//   1. defaultConf : read-only base (node's .conf + global defaults)
+//   2. extraConf   : the only editable layer (draft.EXTRA_CONFIG)
+//   3. declarationConf : read-only, from HYBRID_MESH rendering
 //
-//   1. defaultConf : read-only base (node's .conf + wg + global defaults).
-//   2. extraConf   : the ONLY editable layer (draft.EXTRA_CONFIG). Stores ONLY
-//                    fields the user actually overrode — never the default value.
-//   3. declarationConf : read-only, from HYBRID_MESH rendering (relay/proxy/gw).
-//
-// String-level semantics (wireguard sees everything as strings; arrays/multiline
-// are just front-end editing sugar):
-//   - extra value 'none'        → final = null (key physically deleted on gen)
-//   - extra value starts '@'    → keep default layer value, then append the rest
-//   - extra value (other)       → override default
-//   - extra value empty/absent  → inherit default
-//   - declaration value         → always APPENDED on top (read-only)
-//
-// The front-end never shows the literal '@' — ALLOWED_IPS/SCRIPTS expose an
-// append/override toggle; '@' is added at save time only.
+// String semantics:
+//   - 'none'        → final = null (key deleted on generation)
+//   - starts '@'    → keep default, then append the rest
+//   - other value   → override default
+//   - empty/absent  → inherit default
 
 import type {
   DefaultPeerConfig,
@@ -48,7 +39,7 @@ export interface ConnectionForm {
   PERSISTENT_KEEPALIVE: string
 }
 
-// --- helpers: extra <-> form for multi-value fields ---
+// helpers: extra <-> form for multi-value fields
 function arrToForm(stored: string[] | undefined): { mode: FieldMode; items: string[] } {
   if (!stored || stored.length === 0) return { mode: 'override', items: [] }
   if (stored[0] === '@') return { mode: 'append', items: stored.slice(1) }

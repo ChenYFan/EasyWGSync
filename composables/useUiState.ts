@@ -1,8 +1,6 @@
 // Cross-component UI state (frontend-only, not persisted).
-//
-// mobileSidebarOpen coordinates the header hamburger (layouts/default.vue) with
-// the off-canvas Mesh Groups sidebar (pages/graph.vue). At lg+ the sidebar is
-// static and this flag is ignored.
+// Coordinates header hamburger with off-canvas sidebar at mobile widths.
+
 export function useUiState() {
   const mobileSidebarOpen = useState<boolean>('mobile-sidebar-open', () => false)
 

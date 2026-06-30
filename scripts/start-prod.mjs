@@ -1,24 +1,13 @@
-// Production launcher: load + validate env (reads .env, fails fast on
-// misconfig), write process.env (NITRO_PORT + NUXT_* already in process.env
-// from the .env parse), then import the Nitro server entry LAST — so env is
-// fully in place before Nitro evaluates and reads its listen port.
-//
-// Why this exists: the .output/ bundle is self-contained and does NOT
-// re-evaluate nuxt.config.ts, so the env import there only covers dev/build.
-// In production this launcher is the single place that runs env before Nitro.
+// Production launcher: load env → write NITRO_PORT → import Nitro server.
+// Installs SIGINT/SIGTERM handlers before Nitro for instant shutdown.
+
 import env from '../env.js'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 
 process.env.NITRO_PORT ||= String(env.port)
 
-// Own the shutdown at the entry point. Registered BEFORE importing Nitro, so
-// our listener runs first and hard-exits immediately — bypassing Nitro's
-// GracefulShutdown, which would otherwise poll up to NITRO_SHUTDOWN_TIMEOUT
-// (30s) waiting for long-lived peer/panel connections to close on their own,
-// then run another 30s onShutdown timeout. There is nothing to flush here
-// (configs are written synchronously per-request), so an immediate exit is
-// correct and makes Ctrl+C instant.
+// Instant shutdown: bypasses Nitro's GracefulShutdown timeout.
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.once(sig, () => process.exit(0))
 }

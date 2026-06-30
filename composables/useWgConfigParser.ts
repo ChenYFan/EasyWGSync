@@ -71,17 +71,8 @@ export function parseWireGuardConfig(conf: string): ParsedWireGuardConfig {
 }
 
 /**
- * CENTER's routing table for trace/reachability. CENTER is the WG interface
- * itself — it has NO peer .conf to generate, but its wg0.conf holds a [Peer]
- * for every node (each pinned to its own /32). Build that table from the graph
- * nodes so a trace landing on CENTER routes to the destination peer (covering
- * the whole domain), instead of dead-ending. Shared by health + TraceRoute so
- * both model CENTER identically.
- *
- * `ownIPs` (CENTER's own interface IP, stamped on the CENTER node by
- * deriveGraphData from interfaceInfo.Address) is read off the node so a trace
- * TARGETING CENTER itself terminates (CENTER owns that IP) instead of finding
- * no covering route.
+ * CENTER's routing table for trace/reachability. Builds a simulated [Peer]
+ * for every node (each pinned to its /32 or /128) from graph data.
  */
 export function centerRoutingConfig(nodes: any[]): ParsedWireGuardConfig {
   const peers = new Map<string, ParsedPeer>()
@@ -98,18 +89,11 @@ export function centerRoutingConfig(nodes: any[]): ParsedWireGuardConfig {
 }
 
 /**
- * One routing decision at a node, shared by every trace (health + TraceRoute):
- *  - { reached } : this node owns the target IP (destination).
- *  - { pubkey, cidr } : longest-prefix next hop (cidr = matched route, for display).
- *  - { ambiguous, cidr, pubkeys } : 2+ peers advertise the SAME most-specific
- *    range covering the target — a genuine duplicate-route conflict the node
- *    cannot resolve. (Containment, e.g. /24 vs /32, is NOT a conflict: the
- *    longest prefix / smallest range wins. Only an EXACT-equal winning range
- *    across distinct peers is ambiguous.)
- *  - { fail } : no peer covers the target.
- *
- * Uses only what a real router knows at this hop — the per-peer AllowedIPs — and
- * no global "who really owns this IP" knowledge.
+ * One routing decision at a node. Longest-prefix-match.
+ *  - { reached } : node owns the target IP
+ *  - { pubkey, cidr } : next hop (cidr = matched route)
+ *  - { ambiguous } : 2+ peers advertise the same winning CIDR
+ *  - { fail } : no peer covers the target
  */
 export type RouteStep =
   | { reached: true }
@@ -152,10 +136,8 @@ export function routeStep(conf: ParsedWireGuardConfig, targetIp: string): RouteS
 }
 
 /**
- * Does `conf` have any peer whose AllowedIPs covers `sourceIp`? Models WireGuard
- * cryptokey inbound filtering: a node accepts a packet only if some peer's
- * AllowedIPs covers the source IP. (NAT'd sources — e.g. CENTER's .0 after a
- * NAT hop — are checked against the same rule.)
+ * Does conf have any peer whose AllowedIPs covers sourceIp?
+ * Models WireGuard cryptokey inbound filtering.
  */
 export function acceptsSource(conf: ParsedWireGuardConfig, sourceIp: string): boolean {
   const isV6 = sourceIp.includes(':')
@@ -171,14 +153,8 @@ export function acceptsSource(conf: ParsedWireGuardConfig, sourceIp: string): bo
 }
 
 /**
- * Trace a packet from `sourceId` toward `targetIp`, hop by hop, tracking the
- * source IP. CENTER is an implicit NAT proxy: a packet forwarded OUT of CENTER
- * has its source IP rewritten to `centerOwnIp` (MASQUERADE). On reaching the
- * destination, the destination must accept the (possibly NAT'd) source IP via
- * cryptokey (acceptsSource) — else the trace fails.
- *
- * Returns the hop node ids (for display) + ok/reason. Shared by health +
- * TraceRoutePanel so both model CENTER-NAT + source-acceptance identically.
+ * Trace a packet from sourceId toward targetIp, hop by hop.
+ * CENTER is an implicit NAT proxy — its source IP is rewritten on egress.
  */
 export interface TracePathOpts {
   sourceId: string
@@ -225,9 +201,7 @@ export async function tracePath(opts: TracePathOpts): Promise<{ ok: true; hops: 
     const nextId = pubkeyToId.get(step.pubkey)
     if (!nextId) return { ok: false, reason: `下一跳节点未知`, hops }
 
-    // CENTER NAT: a packet forwarded OUT of CENTER has its source rewritten to
-    // CENTER's own IP (MASQUERADE on the WG interface) — same family as the
-    // target (v4 traffic → CENTER v4, v6 traffic → CENTER v6).
+    // CENTER NAT: packet leaving CENTER has source rewritten to CENTER's own IP.
     if (opts.centerId && currentId === opts.centerId) {
       const isV6 = targetIp.includes(':')
       const nat = isV6 ? opts.centerOwnIpV6 : opts.centerOwnIpV4
@@ -275,9 +249,10 @@ export function ipv6InCIDR(ip: string, cidr: string): boolean {
   return (target & mask) === (net.ip & mask)
 }
 
-/** Parse a bare IPv6 address to a 128-bit BigInt. Returns null if malformed.
- *  Handles `::` compression and embedded-IPv4 tails. Single source for v6
- *  parsing (used by ipv6InCIDR here + maskV6 in useTopology). */
+/**
+ * Parse a bare IPv6 address to 128-bit BigInt.
+ * Handles :: compression and embedded-IPv4 tails.
+ */
 export function parseIPv6ToBigInt(addr: string): bigint | null {
   const halves = addr.split('::')
   if (halves.length > 2) return null
@@ -322,8 +297,7 @@ export function parseIPv6ToBigInt(addr: string): bigint | null {
   return fold(g)
 }
 
-/** Compress a 128-bit BigInt to canonical v6 text (with '::' for the longest
- *  zero run). Reverse of parseIPv6ToBigInt. Single source (used by maskV6). */
+/** Compress 128-bit BigInt to canonical v6 text with :: for longest zero run. */
 export function bigIntToV6(net: bigint): string {
   const groups: number[] = []
   let v = net
@@ -435,7 +409,9 @@ export function isIPv6(s: string): boolean {
   return isIPv6Address(t.slice(0, slash))
 }
 
-/** Classify a token as a valid IPv4 / IPv6 (with optional CIDR), or null if neither. */
+/**
+ * Classify a token as valid IPv4 / IPv6 (with optional CIDR prefix).
+ */
 export function classifyIP(s: string): 'v4' | 'v6' | null {
   if (isIPv4(s)) return 'v4'
   if (isIPv6(s)) return 'v6'
@@ -443,11 +419,7 @@ export function classifyIP(s: string): 'v4' | 'v6' | null {
 }
 
 /**
- * Extract the first bare IP (no /prefix) of the given family from a
- * comma-joined address field (e.g. a node's `address`). Validates each token
- * with classifyIP (so an IPv6-with-embedded-IPv4-tail like `::ffff:1.2.3.4` is
- * NOT misclassified as v4). Single source for the v4/v6-from-address pattern
- * used by health, TraceRoutePanel, and EasyWGSyncModel.getRealIPv4/v6.
+ * Extract first bare IP (no /prefix) of given family from comma-joined address field.
  */
 export function extractIP(addressStr: string, family: 'v4' | 'v6'): string | null {
   const parts = (addressStr || '').split(',').map(s => s.trim()).filter(Boolean)
@@ -458,10 +430,7 @@ export function extractIP(addressStr: string, family: 'v4' | 'v6'): string | nul
 }
 
 /**
- * Extract CENTER's own v4 + v6 bare IPs from its stamped `ownIPs` array
- * (each entry is a host route like "192.168.222.1/32" or "fd00::1/128"). Returns
- * { v4, v6 } (either may be null). Single source for the NAT-source extraction
- * used by health + TraceRoutePanel.
+ * Extract CENTER's own v4 + v6 bare IPs from its stamped ownIPs array.
  */
 export function extractCenterOwnIPs(ownIPs: string[] | undefined): { v4: string | null; v6: string | null } {
   const joined = (ownIPs || []).join(',')
@@ -469,9 +438,7 @@ export function extractCenterOwnIPs(ownIPs: string[] | undefined): { v4: string 
 }
 
 /**
- * Build a pubkey → node-id map by scanning graph nodes (each node's
- * `data.publicKey`). Single source for the pubkeyToId map used by tracePath's
- * callers (health + TraceRoutePanel) to resolve next-hop pubkeys back to nodes.
+ * Build pubkey → node-id map from graph nodes for resolving next-hop pubkeys.
  */
 export function buildPubkeyToId(nodes: any[]): Map<string, string> {
   const m = new Map<string, string>()

@@ -1,21 +1,15 @@
-// composables/useTopology.ts
+// TopologyModel — single source of truth for topology semantics.
+// Shared by renderModel (recording) and EasyWGSyncModel (health).
 //
-// TopologyModel — the single source of truth for topology semantics.
-// Pure OO class (no Vue), shared by renderModel (rendering) and
-// EasyWGSyncModel (health). Consolidates the relay-closure / domain-network
-// logic that was previously duplicated in useHybridMesh + useEasyWGSync.
-//
-// CENTER model (see mem `center-shortcircuit-asymmetry`):
-//   - CENTER is an ordinary peer by default (X→CENTER = CENTER's own host IP).
+// CENTER model:
+//   - CENTER is an ordinary peer by default (X→CENTER = CENTER's host IP).
 //   - An implicit virtual Gateway stacks the domain network onto X→CENTER
-//     unless X explicitly roams via another exit (useRenderModel mechanism A).
-//   - CENTER is an implicit NAT proxy in the simulation: traffic out of CENTER
-//     has its source rewritten to CENTER's own IP (useWgConfigParser tracePath).
-//   - CENTER is NOT a relay (no RELAY declarations name it); the relay closure
-//     only spans explicit RELAY + flatten-Roaming among peers.
-//   - Domain network segment (v4 + v6) is a single global value from CENTER's
-//     interfaceInfo.Address (fetched once at backend startup), masked to its
-//     network address. NOT per-peer, NOT hardcoded.
+//     unless X explicitly roams via another exit.
+//   - CENTER is an implicit NAT proxy: traffic through CENTER has source
+//     rewritten to CENTER's own IP (see tracePath).
+//   - CENTER does NOT relay (no RELAY declarations name it).
+//   - Domain network segment (v4 + v6) is derived from CENTER's
+//     interfaceInfo.Address, masked to its network address.
 
 import type { SyncConfig, Declaration } from '~/types'
 import type { GraphBase } from '~/composables/useGraphDerive'
@@ -24,9 +18,7 @@ import { parseIPv6ToBigInt, bigIntToV6 } from '~/composables/useWgConfigParser'
 export interface NormalizedGroup { members: string[]; enabled: boolean }
 
 /**
- * Normalize MESH_GROUPS — handles both the legacy `string[]` shape and the
- * `{ PEERS, ENABLED }` shape — into `{ members, enabled }`. Single source of
- * truth (was duplicated in deriveGraphData + TopologyModel).
+ * Normalize MESH_GROUPS (handles legacy string[] and {PEERS,ENABLED} shapes).
  */
 export function normalizeMeshGroups(mesh: Record<string, any> | undefined): Record<string, NormalizedGroup> {
   const out: Record<string, NormalizedGroup> = {}
@@ -37,12 +29,7 @@ export function normalizeMeshGroups(mesh: Record<string, any> | undefined): Reco
   return out
 }
 
-/**
- * Mask a v4 CIDR to its network address (clear host bits), keeping the prefix
- * length from the CIDR. "192.168.222.1/24" → "192.168.222.0/24". Used on
- * CENTER's interfaceInfo.Address to derive the domain network segment. Returns
- * null if unparseable.
- */
+/** Mask v4 CIDR to network address, e.g. "192.168.222.1/24" → "192.168.222.0/24". */
 function maskV4(cidr: string): string | null {
   const m = cidr.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d+)$/)
   if (!m) return null
@@ -56,14 +43,7 @@ function maskV4(cidr: string): string | null {
   return `${(net >>> 24) & 255}.${(net >>> 16) & 255}.${(net >>> 8) & 255}.${net & 255}/${prefix}`
 }
 
-/**
- * Mask a v6 CIDR to its network address (clear host bits), keeping the prefix
- * length from the CIDR. Uses BigInt for 128-bit math. "fd00:d00:721::1/80" →
- * "fd00:d00:721::/80". Used on CENTER's interfaceInfo.Address to derive the v6
- * domain network segment. Returns null if unparseable. v6 parse/compress
- * delegated to useWgConfigParser (single source).
- * useWgConfigParser (single source).
- */
+/** Mask v6 CIDR to network address via BigInt 128-bit math. */
 function maskV6(cidr: string): string | null {
   const slash = cidr.lastIndexOf('/')
   if (slash < 0) return null
@@ -85,17 +65,14 @@ export class TopologyModel {
   ) {}
 
   /**
-   * Domain networks (v4 + v6) — the WHOLE network segment, a single global value
-   * fixed at backend startup (CENTER's interface Address from wgdashboard, e.g.
-   * "192.168.222.1/24" → "192.168.222.0/24"). NOT derived per-peer: a peer's own
-   * [Interface] Address is its /32 host address, which is NOT the network
-   * segment. Falls back to the first basePeer address only if interfaceInfo is
-   * unavailable. Single source of truth for gateway stacking + detection.
+   * Domain networks (v4 + v6) — the whole network segment from CENTER's
+   * interfaceInfo.Address (e.g. "192.168.222.1/24" → "192.168.222.0/24").
+   * Falls back to first basePeer address only if interfaceInfo is unavailable.
    */
   getDomainNetworks(): { v4: string | null; v6: string | null } {
     let v4: string | null = null
     let v6: string | null = null
-    // Primary source: CENTER's interface Address (the network segment, e.g. /24).
+    // Primary: CENTER's interface Address (the network segment, e.g. /24).
     const ifAddr = this.base.interfaceInfo?.Address
     if (ifAddr) {
       for (const cidr of ifAddr.split(',').map(s => s.trim()).filter(Boolean)) {
@@ -117,10 +94,8 @@ export class TopologyModel {
   }
 
   /**
-   * CENTER's own /32 + /128 — its real interface IP (the demotion value, and
-   * what CENTER "owns" so a trace targeting it terminates). Authoritative source
-   * is WGDashboard's interface Address; falls back to the domain network base
-   * (correct when CENTER sits on the network's lowest address).
+   * CENTER's own /32 + /128 — its real interface IP. Authoritative source is
+   * interfaceInfo.Address; falls back to the domain network base.
    */
   getCenterOwnIPs(): string[] {
     const addr = this.base.interfaceInfo?.Address
@@ -141,11 +116,7 @@ export class TopologyModel {
   }
 
   /**
-   * The endpoint peers dial to reach CENTER — a single global value from the
-   * backend-fixed sources: `globalDefaults.remote_endpoint` (CENTER's public
-   * host, from wgdashboard) + `interfaceInfo.ListenPort` (CENTER's listen port).
-   * Returns null if either is missing. NOT read from a peer's .conf [Peer]
-   * Endpoint (that's whichever [Peer] came last — fragile).
+   * CENTER's dial endpoint — from globalDefaults.remote_endpoint + interfaceInfo.ListenPort.
    */
   getCenterDialEndpoint(): string | null {
     const host = this.base.globalDefaults?.remote_endpoint
@@ -171,10 +142,8 @@ export class TopologyModel {
   }
 
   /**
-   * Relay transitive closure: EXPLICIT RELAY declarations + Roaming-flatten
-   * expansion only. CENTER is NOT included (CENTER does not relay).
-   * Respects group ENABLED (a relay edge is only valid if the pair has an
-   * underlying connection — same enabled mesh group or manual P2P).
+   * Relay transitive closure: explicit RELAY + Roaming-flatten only.
+   * CENTER is NOT included. Respects group ENABLED.
    * Returns Map<pubkey, Set<reachable>>.
    */
   getRelayReachability(): Map<string, Set<string>> {
@@ -228,10 +197,7 @@ export class TopologyModel {
   }
 
   /**
-   * Classify the underlying connection between a and b:
-   *  - 'enabled'  : same enabled mesh group, or manual P2P entry (takes effect)
-   *  - 'disabled' : same mesh group but the group is ENABLED:false (exists but not active)
-   *  - 'none'     : no relationship at all (declaration cannot apply — error)
+   * Classify connection: enabled (same enabled group or P2P) / disabled (same group but disabled) / none.
    */
   classifyConnection(a: string, b: string): 'enabled' | 'disabled' | 'none' {
     let inDisabled = false
@@ -246,12 +212,8 @@ export class TopologyModel {
   }
 
   /**
-   * All enabled GATEWAY declarations (manual + Roaming flatten/nat expansion)
-   * that have an underlying direct connection. A declaration with no underlying
-   * connection does NOT take effect (no edge to attach to) and is reported by
-   * health's "missing connections" check instead — it is excluded here so it
-   * does not count toward gateway uniqueness.
-   * Each {PUBLIC: exit A, PRIVATE: X} means X→A is a gateway edge.
+   * All enabled GATEWAY declarations (manual + Roaming expansion).
+   * Excludes those with no underlying connection — they don't count toward uniqueness.
    */
   getGatewayDeclarations(): Declaration[] {
     const hm = (this.config as any).HYBRID_MESH
@@ -278,25 +240,16 @@ export class TopologyModel {
   }
 
   /**
-   * The set of peers that explicitly roam via another exit = PRIVATE_PEER of any
-   * enabled GATEWAY/ROAMING declaration. Such a peer's implicit CENTER gateway
-   * is disabled (X→CENTER falls back to CENTER's own host IP). Shared by
-   * buildHistories (center-gateway stacking) + HybridMeshPanel (display).
+   * Peers that explicitly roam via another exit (= PRIVATE of any GATEWAY/ROAMING).
+   * Their implicit CENTER gateway is disabled.
    */
   getExplicitGatewayPrivates(): Set<string> {
     return new Set(this.getGatewayDeclarations().map(d => d.PRIVATE_PEER))
   }
 
   /**
-   * Nodes that DIRECTLY relay X (X is PRIVATE of an enabled RELAY declaration
-   * or flatten Roaming). Used by health relay-uniqueness check.
-   *
-   * IMPORTANT: only counts DIRECT relayers, not transitive. A relay chain
-   * A→B→C means C is directly relayed by B only; A reaches C transitively
-   * but is NOT a direct relayer of C. Transitive reach is legitimate (same
-   * chain), not a uniqueness violation. A real violation is X being PRIVATE
-   * of two independent relay declarations (two direct relayers not on the
-   * same chain).
+   * Direct relayers of X — only node that lists X as PRIVATE in a RELAY/flatten.
+   * Transitive chain (A→B→C) is legitimate; only independent direct relayers violate.
    */
   getDirectRelayersOf(x: string): string[] {
     const hm = (this.config as any).HYBRID_MESH

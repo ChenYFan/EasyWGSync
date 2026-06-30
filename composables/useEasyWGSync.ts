@@ -1,5 +1,4 @@
-// EasyWGSync data model class
-// Centralizes all topology data access and perspective-based lookups
+// EasyWGSyncModel — centralized topology data access + quick health checks.
 
 import { TopologyModel } from '~/composables/useTopology'
 import { classifyIP } from '~/composables/useWgConfigParser'
@@ -19,17 +18,13 @@ export class EasyWGSyncModel {
     this.config = config || graphData?.config || null
   }
 
-  // TopologyModel needs the real GraphBase (interfaceInfo/globalDefaults/
-  // onlineEndpoints are network-wide values fetched once from wgdashboard and
-  // held in the global useDraft().base — NOT recoverable from graphData, which
-  // only carries derived nodes/edges). Reuse that global base instead of
-  // rebuilding a lossy one from graphData.
+  // Reuse the global GraphBase (interfaceInfo/globalDefaults are network-wide).
   private getTopologyModel(): TopologyModel {
     const { base, draft } = useDraft()
     return new TopologyModel(base.value, draft.value)
   }
 
-  // === Node lookups ===
+  // Node lookups
 
   getNode(id: string) {
     return this.nodes.find(n => n.id === id)

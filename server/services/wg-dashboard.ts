@@ -43,10 +43,8 @@ export async function fetchPeerNames(): Promise<string[]> {
 }
 
 /**
- * Fetch WGDashboard's global default settings (`/api/getDashboardConfiguration`
- * → data.Peers): peer_endpoint_allowed_ip, peer_global_dns, peer_keep_alive,
- * peer_mtu, remote_endpoint. These are the placeholder/base values for the
- * DEFAULT config layer. Returns {} if unavailable.
+ * Fetch WGDashboard global defaults (peer_endpoint_allowed_ip, peer_global_dns,
+ * peer_keep_alive, peer_mtu, remote_endpoint). Returns {} if unavailable.
  */
 export async function fetchGlobalDefaults(): Promise<WGDGlobalDefaults> {
   const config = getConfig()
@@ -68,9 +66,8 @@ export async function fetchGlobalDefaults(): Promise<WGDGlobalDefaults> {
 }
 
 /**
- * Fetch the CENTER/WG interface info (`/api/getWireguardConfigurations` → find
- * by configuration name): Name, Address, ListenPort, PrivateKey, PublicKey,
- * PreUp/PostUp/PreDown/PostDown, Status. Returns null if unavailable.
+ * Fetch CENTER/WG interface info (Name, Address, ListenPort, PublicKey, etc.).
+ * Returns null if unavailable.
  */
 export async function fetchInterfaceInfo(cfgName?: string): Promise<WGDInterfaceInfo | null> {
   const config = getConfig()

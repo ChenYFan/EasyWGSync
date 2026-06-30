@@ -75,10 +75,8 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
   const me = finalConf.peers[pubKey]
   if (!me || !me.privateKey) return ''
 
-  // ===== 第一段: [Interface] + CENTER [Peer] =====
-  // finalConf is the fully-merged result (default→extra→declaration converged).
-  // config-generator only serializes it — never re-parses raw .conf, never
-  // falls back to a separate default. 'none' sentinel = deleted → omit.
+  // [Interface]: serialize FinalPeerConfig — never re-parse raw .conf.
+  // 'none' sentinel → omit.
   const lines: string[] = ['[Interface]']
 
   lines.push(`PrivateKey = ${me.privateKey}`)
@@ -92,7 +90,7 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
     }
   }
 
-  // [Peer] — CENTER (this peer's converged view of CENTRAL_NODE)
+  // [Peer] — CENTER (this peer's view of CENTRAL_NODE)
   const central = me.conns['CENTRAL_NODE']
   if (centerPubKey && central) {
     lines.push('', '[Peer]')
@@ -104,13 +102,7 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
     if (central.keepalive != null) lines.push(`PersistentKeepalive = ${central.keepalive}`)
   }
 
-  // ===== 第二段: mesh [Peer] =====
-  // For each mesh peer X: AllowedIPs/Endpoint = this viewer's per-connection
-  // view (me.conns[X]) if a manual P2P override exists — its allowedIPs already
-  // carries X's own peer history (default + relay + X's manual) PLUS this
-  // viewer's manual, converged. With no P2P override there is no conn entry, so
-  // fall back to X's own converged ownAllowedIPs (= the same peer history, just
-  // without a viewer layer). Both paths read X's declared IPs — never raw .conf.
+  // [Peer] — mesh peers: viewer's P2P override → peer's ownAllowedIPs fallback.
   const meshPeers = new Set<string>()
   for (const [, group] of Object.entries(finalConf.meshGroups || {})) {
     const members = Array.isArray(group) ? group : (group as any).PEERS
@@ -143,7 +135,7 @@ export async function generatePeerConfig(peerName: string, overrideConfig?: Sync
     lines.push(`PersistentKeepalive = ${ka != null ? ka : 21}`)
   }
 
-  // ===== ExtraInfo (proxy list + savedAt, for ewctl) =====
+  // ExtraInfo: proxy list + savedAt for ewctl version-skip.
   const proxied = me.proxyList || []
   const savedAt = await getConfigMtime()
   const extraInfo = JSON.stringify({ proxied, savedAt })

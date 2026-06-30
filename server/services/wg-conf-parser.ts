@@ -1,9 +1,4 @@
-// server/services/wg-conf-parser.ts
-//
-// Single source of truth for parsing a WireGuard `.conf` text into a structured
-// object. Shared by `graph.get.ts` (exposes JSON to the frontend) and
-// `config-generator.ts` (builds the final .conf). "Backend parses .conf once."
-//
+// Parse a WireGuard .conf into a structured object.
 // Pure: input text → output object, no side effects, no Nuxt runtime.
 
 import type { ParsedPeerConf, DefaultPeerConfig, WGDGlobalDefaults, ScriptType } from '~/types'
@@ -11,12 +6,7 @@ import type { ParsedPeerConf, DefaultPeerConfig, WGDGlobalDefaults, ScriptType }
 const SCRIPT_TYPES: ScriptType[] = ['PreUp', 'PostUp', 'PreDown', 'PostDown']
 
 /**
- * Parse a `.conf` text into a structured object.
- *
- * Handles `[Interface]` and `[Peer]` sections. Lines are `key = value`
- * (split on first ` = `). Comments (`#`, `;`) and blank lines are ignored.
- * `# 以下配置被EasyWGSync禁用 ...` prefixed lines (already-commented by the
- * generator) are skipped so re-parsing a generated config stays stable.
+ * Parse .conf text → ParsedPeerConf. Handles [Interface] and [Peer] sections.
  */
 export function parsePeerConf(text: string): ParsedPeerConf {
   const result: ParsedPeerConf = {
@@ -32,7 +22,6 @@ export function parsePeerConf(text: string): ParsedPeerConf {
 
   if (!text) return result
 
-  // Section-aware parsing: track which section we are in.
   let section: 'interface' | 'peer' | null = null
   const lines = text.split('\n')
 
@@ -43,7 +32,7 @@ export function parsePeerConf(text: string): ParsedPeerConf {
       section = line.toLowerCase() === '[peer]' ? 'peer' : 'interface'
       continue
     }
-    // Skip comment lines (incl. generator's "被禁用" markers).
+    // Skip comment lines.
     if (line.startsWith('#') || line.startsWith(';')) continue
 
     const eqIdx = line.indexOf('=')
@@ -103,9 +92,7 @@ export function parsePeerConf(text: string): ParsedPeerConf {
 }
 
 /**
- * Build the DEFAULT config layer (DefaultPeerConfig) from a parsed `.conf`,
- * global defaults, and identity. Shared by graph.get + config-generator so both
- * construct the default layer identically.
+ * Build the DEFAULT config layer from parsed .conf + global defaults + identity.
  */
 export function buildDefaultPeerConfig(
   parsed: ParsedPeerConf,

@@ -22,10 +22,7 @@ function exec(cmd: string, args: string[], timeoutMs = 5000): Promise<ExecResult
 }
 
 export async function getShowEndpoints(configName: string): Promise<Record<string, string>> {
-  // A peer is "online" only if it has a recent handshake — `wg show endpoints`
-  // keeps the last-seen endpoint forever, so a dead peer would otherwise stay
-  // green. Fetch latest-handshakes too and keep only peers whose last handshake
-  // is within the threshold (default ~30 min).
+  // Only peers with recent handshake (≤30 min) are considered online.
   const HANDSHAKE_RECENT_MS = 30 * 60 * 1000
 
   const [endpointsRes, hsRes] = await Promise.all([

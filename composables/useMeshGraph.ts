@@ -232,20 +232,11 @@ export function buildVueFlowElements(
   vfNodes.push(...groupNodes)
 
   //
-  // === 边点击命中 bug 说明（见 MeshCanvas.vue 的 .vue-flow__edge-interaction CSS）===
-  // Vue Flow 每条边画两个 SVG path：edge-path（可见线）+ edge-interaction（20px 透明命中带）。
-  // 问题：SVG 开放 path 的 isPointInFill 会隐式闭合起终点，贝塞尔曲线鼓出一侧时
-  // 形成"肚子"填充区。edge 容器默认 pointer-events: all，且 path 默认 visiblePainted，
-  // 导致这个不可见的肚子也能接收点击。
+  // Edge click hit-detection fix: Vue Flow's edge-interaction SVG path
+  // implicitly closes into a fill region, stealing clicks from nearby
+  // reverse-direction edges. Fixed via CSS pointer-events: stroke + fill: none.
   //
-  // 在双向边场景（A→B 和 B→A 两条贝塞尔互相穿过对方肚子）下：点 rev 可见线时，
-  // 点击坐标落进 fwd 的隐式 fill 区域 → fwd 抢走点击，即使点离 fwd 的 stroke 有 72px。
-  //
-  // 这个 bug 在稀疏/单向图里不暴露（肚子盖不到别的边），HybridMesh 全双向 + 贝塞尔
-  // default 类型 + 密集布局三因素叠加才逼出来。修法：interaction/path 设
-  // pointer-events: stroke + fill: none，只让 20px stroke 带命中，消除肚子拦截。
-  //
-  // Step 0: Compute absolute positions for each handle on each node
+  // Step 0: compute absolute positions for each handle on each node.
   const handleAbsPos = new Map<string, Map<string, { x: number; y: number }>>()
   for (const node of data.nodes) {
     const pos = positions.get(node.id) || { x: 0, y: 0 }
@@ -260,8 +251,8 @@ export function buildVueFlowElements(
   const getNodeW = (id: string) => nodeDimensions?.get(id)?.width || 450
   const getNodeH = (id: string) => nodeDimensions?.get(id)?.height || 160
 
-  const handleUsage = new Map<string, number>() // "nodeId:handleId" -> usage count (across ALL edges)
-  const pairHistory = new Map<string, { srcH: string; tgtH: string }>() // "A|B" sorted pair -> first edge handles
+  const handleUsage = new Map<string, number>()
+  const pairHistory = new Map<string, { srcH: string; tgtH: string }>()
 
   for (const edge of data.edges) {
     const estate = edgeState.get(`${edge.source}->${edge.target}`) || 'normal'
@@ -271,14 +262,14 @@ export function buildVueFlowElements(
     const srcPos = positions.get(edge.source) || { x: 0, y: 0 }
     const tgtPos = positions.get(edge.target) || { x: 0, y: 0 }
 
-    // Step 1: Determine valid sides, get 9 candidates per node
+    // Step 1: determine valid sides, get candidate handles.
     const srcCandidates = getCandidateHandles(getValidSides(srcPos, tgtPos))
     const tgtCandidates = getCandidateHandles(getValidSides(tgtPos, srcPos))
 
     const srcAbsMap = handleAbsPos.get(edge.source)!
     const tgtAbsMap = handleAbsPos.get(edge.target)!
 
-    // Step 5: Check if there's an existing A-B connection (directional pair)
+    // Step 5: check for existing A-B pair → anti-cross direction reward.
     const pairKey = [edge.source, edge.target].sort().join('|')
     const existingPair = pairHistory.get(pairKey)
 
@@ -286,7 +277,7 @@ export function buildVueFlowElements(
     let tgtHandle: string
 
     if (!existingPair) {
-      // No existing connection between this pair: pure distance selection (steps 2,3,4)
+      // First edge: pure distance selection.
       let bestDist = Infinity
       srcHandle = srcCandidates[0]?.id || HANDLE_POINTS[0].id
       tgtHandle = tgtCandidates[0]?.id || HANDLE_POINTS[0].id
@@ -315,12 +306,7 @@ export function buildVueFlowElements(
 
       pairHistory.set(pairKey, { srcH: srcHandle, tgtH: tgtHandle })
     } else {
-      // Step 5: 已有 A-B 连接 (A-1, B-1)。
-      // 先正常跑 step 3+4 得到 A-n（和首条边完全相同的 9×9）。
-      // 然后判断 A-n 在 A-1 的顺时针还是逆时针（cwIndex 比较）。
-      // 给 B 侧同方向的候选点加惩罚 x1.4。
-      // 重跑 step 3+4（带方向惩罚的 9×9），返回结果，不再走 step 5。
-
+      // Second (reverse) edge: apply anti-cross direction reward.
       const isForward = edge.source === [edge.source, edge.target].sort()[0]
       const prevOnSrc = isForward ? existingPair.srcH : existingPair.tgtH
       const prevOnTgt = isForward ? existingPair.tgtH : existingPair.srcH
@@ -328,7 +314,7 @@ export function buildVueFlowElements(
       const prevSrcPoint = HANDLE_POINTS.find(c => c.id === prevOnSrc)
       const prevTgtPoint = HANDLE_POINTS.find(c => c.id === prevOnTgt)
 
-      // First pass: normal step 3+4 to get initial A-n
+      // First pass: normal distance to get initial A-n.
       let bestDist = Infinity
       srcHandle = srcCandidates[0]?.id || HANDLE_POINTS[0].id
       tgtHandle = tgtCandidates[0]?.id || HANDLE_POINTS[0].id
@@ -351,8 +337,7 @@ export function buildVueFlowElements(
         }
       }
 
-      // Determine direction: A-n CW or CCW from A-1?
-      // cwIndex bigger = CW, smaller = CCW (handle wrap at 0/15)
+      // Determine direction: A-n CW or CCW from A-1? cwIndex diff.
       let direction = 0 // +1 = CW, -1 = CCW
       if (prevSrcPoint) {
         const curSrcPoint = HANDLE_POINTS.find(c => c.id === srcHandle)
@@ -366,7 +351,7 @@ export function buildVueFlowElements(
         }
       }
 
-      // Second pass: re-run step 3+4 with direction penalty on B's same-direction candidates
+      // Second pass: re-run with direction reward on B's opposite-direction handles.
       if (direction !== 0 && prevTgtPoint) {
         bestDist = Infinity
         for (const sh of srcCandidates) {
@@ -378,7 +363,7 @@ export function buildVueFlowElements(
             const tgtUsed = handleUsage.get(`${edge.target}:${th.id}`) || 0
             let tgtPenalty = th.penalty * Math.pow(1.4, tgtUsed)
 
-            // Direction reward: B candidates in OPPOSITE direction from A-n get x0.72
+            // B candidates in opposite direction from A-n get reward ×0.72.
             const tgtDiff = th.cwIndex - prevTgtPoint.cwIndex
             let tgtDir = 0
             if (tgtDiff > 0 && tgtDiff <= 8) tgtDir = 1
@@ -409,14 +394,14 @@ export function buildVueFlowElements(
     const color = getGroupColor(edge.data.primaryGroup || '')
     const hasP2PConfig = !!edge.data.hasP2PConfig
 
-    // Dashed if no extra P2P config (default connection)
+    // Dashed if no P2P config (default connection).
     const isDashed = !hasP2PConfig
 
     const isSelectedEdge = viewState.selectedEdge &&
       edge.source === viewState.selectedEdge.source &&
       edge.target === viewState.selectedEdge.target
 
-    // Selected edge color follows theme (white in dark, black in light)
+    // Selected edge color follows theme.
     const selectedColor = typeof document !== 'undefined' && document.documentElement.classList.contains('dark') ? '#ffffff' : '#000000'
 
     vfEdges.push({
@@ -438,10 +423,6 @@ export function buildVueFlowElements(
         filter: isSelectedEdge ? `drop-shadow(0 0 4px ${selectedColor}99)` : undefined,
       },
       markerEnd: { type: 'arrowclosed' as any, color: isSelectedEdge ? selectedColor : color },
-      // NOTE: edges do NOT use z-index — Vue Flow's hit detection iterates by
-      // z-index (highest first), so a high-z selected edge would steal clicks
-      // from visually-closer lower-z edges. Keeping all edges at the same z
-      // makes hit detection pick the geometrically nearest edge instead.
     })
   }
 

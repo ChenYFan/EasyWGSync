@@ -1,9 +1,9 @@
-// Draft store: the single source of truth for the editor's working copy.
+// Draft store: single source of truth for the editor's working copy.
 //
-// - `base`     : read-only peer/center info from WGDashboard (never edited)
-// - `persisted`: last-saved config snapshot (diff baseline)
-// - `draft`    : reactive deep clone of persisted; ALL edits mutate this
-// - `graphData`: derived live from (base, draft) — the graph reflects unsaved edits
+// base        : read-only peer/center info from WGDashboard
+// persisted   : last-saved config snapshot (diff baseline)
+// draft       : reactive clone of persisted; ALL edits mutate this
+// graphData   : derived live from (base, draft), reflects unsaved edits
 //
 // Nothing hits config.json until commit() PUTs the whole draft.
 
@@ -38,8 +38,7 @@ export function useDraft() {
   const loaded = useState<boolean>('draft-loaded', () => false)
   const previewOpen = useState<boolean>('draft-preview-open', () => false)
 
-  // Frontend-only: virtual groups whose edges are hidden (CENTER_GROUP hidden by
-  // default to reduce clutter). Members + group boxes still render.
+  // Frontend-only: virtual groups whose edges are hidden (CENTER_GROUP hidden by default).
   const hiddenVirtualGroups = useState<Set<string>>('hidden-virtual-groups', () => new Set(['CENTER_GROUP']))
 
   function toggleVirtualGroupVisible(name: string) {
@@ -48,10 +47,10 @@ export function useDraft() {
     hiddenVirtualGroups.value = s
   }
 
-  // Single recording pass: per-field changelogs for every Peer/Connection.
+  // Single recording pass → live-derived graph
   const renderModel = computed(() => buildHistories(base.value, draft.value))
 
-  // Live-derived graph — render via the SAME model (no second buildHistories).
+  // Single recording pass → live-derived graph
   const graphData = computed(() => {
     const rendered = renderConfig(base.value, draft.value, renderModel.value)
     return deriveGraphData(base.value, rendered, hiddenVirtualGroups.value)
@@ -75,18 +74,17 @@ export function useDraft() {
     loaded.value = true
   }
 
-  // --- Edits (mutate draft only) ---
+  // Edit methods (mutate draft only)
+
   function upsertPeer(pubkey: string, data: PeerExtraConfig) {
-    // Peer form owns all non-P2P fields (replace them); preserve P2P_CONFIG,
-    // which is managed separately via the connection editor.
+    // Peer form owns all non-P2P fields; preserve existing P2P_CONFIG.
     const existing = draft.value.EXTRA_CONFIG[pubkey] || {}
     const next: PeerExtraConfig = { ...data }
     if (existing.P2P_CONFIG) next.P2P_CONFIG = existing.P2P_CONFIG
     draft.value.EXTRA_CONFIG[pubkey] = next
   }
 
-  // When target is the CENTER node, P2P config is stored under the special
-  // 'CENTRAL_NODE' key (matches config-generator). Otherwise use the target pubkey.
+  // CENTER P2P config is stored under special key 'CENTRAL_NODE'.
   function p2pKey(target: string): string {
     return target === base.value.centerPubKey ? 'CENTRAL_NODE' : target
   }
@@ -143,9 +141,8 @@ export function useDraft() {
     draft.value.MESH_GROUPS[name] = { PEERS: cur.PEERS.filter(m => m !== pubkey), ENABLED: cur.ENABLED }
   }
 
-  // === HYBRID_MESH intent-layer methods (replace old relayFor/setAsGateway) ===
-  // These modify the HYBRID_MESH declarations (intent), NOT ALLOWED_IPS directly.
-  // The renderer (renderHybridMesh) converts intent → ALLOWED_IPS at display time.
+  // HYBRID_MESH intent-layer methods: modify declarations, NOT ALLOWED_IPS.
+  // The renderer converts intent → ALLOWED_IPS at display time.
 
   function addRelay(pub: string, priv: string, enabled = true) {
     draft.value.HYBRID_MESH = addDeclaration(draft.value.HYBRID_MESH, 'RELAY', pub, priv, enabled)
@@ -172,7 +169,7 @@ export function useDraft() {
   function removeRoamingEntry(pub: string, priv: string) {
     draft.value.HYBRID_MESH = removeRoaming(draft.value.HYBRID_MESH, pub, priv)
   }
-  // In-place edits — keep the entry's list position (remove+add would reorder it).
+  // In-place edits: keep entry's list position.
   function updateRelay(origPub: string, origPriv: string, pub: string, priv: string, enabled = true) {
     draft.value.HYBRID_MESH = updateDeclaration(draft.value.HYBRID_MESH, 'RELAY', origPub, origPriv, pub, priv, enabled)
   }

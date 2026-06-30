@@ -1,9 +1,5 @@
-// JWT verification against Casdoor's JWKS public keys.
-//
-// Principle: minimize Casdoor interaction. Public keys are fetched once and
-// cached by jose's createRemoteJWKSet; verification is fully local thereafter.
-// We refresh the key set at most every 24h (jose also auto-refreshes on unknown
-// kid with its own cooldown).
+// JWT verification against Casdoor's JWKS. Keys fetched once, cached 24h.
+// Local verification thereafter — no per-request Casdoor calls.
 
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose'
 import { createLogger } from './logger'
@@ -17,8 +13,7 @@ const REFRESH_INTERVAL = 24 * 60 * 60 * 1000 // 24h
 
 function getJwks(issuer: string) {
   const now = Date.now()
-  // Recreate the key set if issuer changed or 24h elapsed (forces a re-fetch
-  // on next verify). jose caches keys internally between these resets.
+  // Recreate key set if issuer changed or >24h elapsed.
   if (!jwks || jwksIssuer !== issuer || now - lastRefresh > REFRESH_INTERVAL) {
     // Casdoor exposes JWKS at /.well-known/jwks
     jwks = createRemoteJWKSet(new URL(`${issuer}/.well-known/jwks`))
@@ -29,14 +24,10 @@ function getJwks(issuer: string) {
   return jwks
 }
 
-// Verify a Casdoor-issued JWT (id_token). Local verification using cached keys.
-// Throws if signature/issuer/expiry invalid.
+// Verify a Casdoor-issued JWT locally against cached keys.
 export async function verifyToken(token: string, issuer: string): Promise<JWTPayload> {
   const keySet = getJwks(issuer)
-  const { payload } = await jwtVerify(token, keySet, {
-    // Casdoor sets `iss` to the issuer URL
-    issuer,
-  })
+  const { payload } = await jwtVerify(token, keySet, { issuer })
   return payload
 }
 

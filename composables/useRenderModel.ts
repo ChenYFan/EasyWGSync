@@ -1,60 +1,43 @@
-// composables/useRenderModel.ts
+// Three-layer config convergence engine.
 //
-// Single convergence capability for the whole config. Every field of a
-// Peer/Connection is modeled as an ordered CHANGELOG (FieldHistory): each layer
-// (default → extra → declaration) pushes modification records in application
-// order. `converge()` is the ONE pure fold that turns a changelog into a final
-// value — it does NOT query topology, the graph, or re-render anything.
+// Each field of every Peer/Connection is an ordered changelog (FieldHistory)
+// with records from three layers applied in order:
+//   default → declaration → manual (always last)
 //
-// All generation (Peer .conf, Connection config, graph edge values, panel
-// preview) reads the converged result. Queries (topology / relay closure /
-// gateway detection) happen only in the recording phase (buildHistories, added
-// in a later step), never here.
+// buildHistories() is the single recording pass — all topology queries happen
+// here. renderConfig() + converge() are pure folds over the changelogs.
+// Downstream (config-generator, deriveGraphData, panels) reads converged finals.
 
 export type Layer = 'default' | 'extra' | 'declaration'
 
-// override = replace accumulated; append = add on top (@); none = delete key.
+// override = replace accumulated; append = add on top; none = delete key.
 export type Op = 'override' | 'append' | 'none'
 
 export interface Mod {
   layer: Layer
   op: Op
-  value: string            // the change's content (joined string; ignored for 'none')
-  origin?: string          // who made it: 'conf' | 'manual' | 'gateway:<A>' | 'relay:<R>' | 'proxy:<P>' | 'center-gateway' | 'global'
+  value: string
+  origin?: string
 }
 
 export type FieldHistory = Mod[]
 
 export interface Converged {
-  final: string | null     // folded final value; null = key deleted / nothing
-  history: DisplayMod[]     // the (non-empty) records that participated, in order
-  deleted: boolean         // a surviving 'none' deleted the key
+  final: string | null
+  history: DisplayMod[]
+  deleted: boolean
 }
 
 /** A participating record annotated for display (struck if later replaced). */
 export interface DisplayMod extends Mod {
-  superseded: boolean      // a LATER record (override/none) replaced this one
+  superseded: boolean
 }
 
 /**
- * The ONE convergence function. Pure fold over an ordered changelog.
- *   override → acc = value (replace)
- *   append   → acc = acc + sep + value (add; acc empty → value)
- *   none     → mark deleted
- *
- * MANUAL SINK: before folding, every record with layer 'extra' (manual edits)
- * is shifted — preserving relative order — to the END of the list. So a node's
- * own manual declaration always applies on top of everything it inherited from
- * the other peer's history + declarations, regardless of where it was recorded.
- * op is NOT inspected here (override sinks the same as append); if the user
- * chose override, it simply wipes the accumulated value — their call.
- *
- * 'none' has lowest priority: it is resolved by the running fold like any other
- * record (a later override/append revives the key); only a SURVIVING delete at
- * the end yields final = null.
+ * Pure fold over a changelog. Manual (extra-layer) records are sunk to the end.
+ * override → acc = value; append → acc + sep + value; none → mark deleted.
  */
 export function converge(history: FieldHistory, sep: string): Converged {
-  // Sink all manual (extra-layer) records to the end, keeping their relative order.
   const nonManual = history.filter(m => m.layer !== 'extra')
   const manual = history.filter(m => m.layer === 'extra')
   const ordered = manual.length ? [...nonManual, ...manual] : history
@@ -64,23 +47,15 @@ export function converge(history: FieldHistory, sep: string): Converged {
   const seen: DisplayMod[] = []
 
   for (const m of ordered) {
-    // Skip empty contributions (inherit ≡ no record). Keep 'none' even if value empty.
     if (m.op !== 'none' && (m.value === undefined || m.value === null || m.value === '')) continue
     seen.push({ ...m, superseded: false })
-    if (m.op === 'none') {
-      deleted = true
-      acc = null
-      continue
-    }
+    if (m.op === 'none') { deleted = true; acc = null; continue }
     deleted = false
-    if (m.op === 'append') {
-      acc = acc ? `${acc}${sep}${m.value}` : m.value
-    } else {
-      acc = m.value
-    }
+    if (m.op === 'append') { acc = acc ? `${acc}${sep}${m.value}` : m.value }
+    else { acc = m.value }
   }
 
-  // Mark each record superseded if a LATER record replaced (override/none) it.
+  // Mark each record superseded if a later record replaced it.
   for (let i = 0; i < seen.length; i++) {
     for (let j = i + 1; j < seen.length; j++) {
       if (seen[j].op === 'override' || seen[j].op === 'none') { seen[i].superseded = true; break }
@@ -91,8 +66,8 @@ export function converge(history: FieldHistory, sep: string): Converged {
 }
 
 // =========================================================================
-// buildHistories — the ONE recording pass. All queries (topology / relay
-// closure / gateway / proxy) happen here; downstream only converge()s.
+// buildHistories — the single recording pass. All topology queries (relay
+// closure, gateway, proxy) happen here; downstream only converge()s.
 // =========================================================================
 
 import type { SyncConfig, DefaultPeerConfig, ScriptType, WGDGlobalDefaults, MeshGroup, HybridMesh } from '~/types'
@@ -102,26 +77,13 @@ import { TopologyModel } from '~/composables/useTopology'
 const SCRIPT_TYPES: ScriptType[] = ['PreUp', 'PostUp', 'PreDown', 'PostDown']
 
 /**
- * Proxy (NAT) script for the PUBLIC node A. Generates the MASQUERADE iptables
- * rules for the proxied source IPs — appended to the node's PostUp/PostDown as
- * a single line (wg-quick parses PostUp as one value; newlines break it).
- *
- * Forwarding is already permitted by the node's DEFAULT scripts, and the default
- * MASQUERADE (`-s domain ! -d domain`) NATs domain→external while EXEMPTING
- * intra-domain traffic. That exemption is exactly why a proxied node X fails to
- * reach other in-domain peers (they see X's real source and can't route back).
- * So proxy adds ONLY one rule per proxied source IP: MASQUERADE X's packets
- * leaving the WG interface, covering the intra-domain case the default skips.
+ * Proxy (NAT) script: MASQUERADE iptables rules for proxied source IPs.
+ * Appended to PUBLIC node's PostUp/PostDown. Exemption from the default
+ * domain NAT is why proxy is needed for intra-domain traffic.
  */
 export function buildProxyScript(proxiedIPs: string[]): { up: string; down: string } {
   const cmd = (ip: string) => (ip.includes(':') ? 'ip6tables' : 'iptables')
-  // PostUp: add one MASQUERADE rule per proxied source IP (first bring-up by
-  // wg-quick). Single line — wg-quick parses PostUp as one value, newlines break
-  // it. ewctl (if used) does incremental -A/-D from the ExtraInfo block instead.
   const up = proxiedIPs.map(ip => `${cmd(ip)} -t nat -A POSTROUTING -s ${ip} -o %i -j MASQUERADE`)
-  // PostDown: one-shot clear of every MASQUERADE rule on the %i interface (wg-quick
-  // down runs this once). Lists POSTROUTING rules touching %i, flips -A→-D, deletes
-  // each. Single line.
   const down = [
     `iptables -t nat -S POSTROUTING | grep -E -- '-o %i ' | grep -E -- '-j MASQUERADE' | sed 's/^-A/-D/' | xargs -r -L1 iptables -t nat`,
     `ip6tables -t nat -S POSTROUTING | grep -E -- '-o %i ' | grep -E -- '-j MASQUERADE' | sed 's/^-A/-D/' | xargs -r -L1 ip6tables -t nat`,
@@ -141,23 +103,19 @@ export interface RenderModel {
   peers: Record<string, Record<string, FieldHistory>>
   /** conns[`${src}|${key}`][field] = changelog. key = target pubkey or 'CENTRAL_NODE'. */
   conns: Record<string, Record<string, FieldHistory>>
-  /** `${src}->${target}` edges that are gateways (/24 whole-domain). */
+  /** `${src}->${target}` edges that are gateways (whole-domain). */
   gatewayEdges: Set<string>
-  /** pubkeys acting as a proxy PUBLIC (their PostUp carries the MASQUERADE block). */
+  /** pubkeys acting as proxy PUBLIC (PostUp carries MASQUERADE block). */
   proxies: Set<string>
-  /** pubkey → proxied source IPs (the -s CIDRs this node MASQUERADEs). Surfaced
-   *  as a JSON comment block in the .conf so ewctl can diff without parsing scripts. */
+  /** pubkey → proxied source CIDRs (for ExtraInfo / ewctl). */
   proxyLists: Record<string, string[]>
-  /** connection keys that are gateway-declared & read-only, with no underlying conn. */
+  /** connection keys that are gateway-declared with no underlying conn. */
   connNoUnderlying: Set<string>
 }
 
 /**
- * The fully-merged final config — the OUTPUT of the render pipeline. Every field
- * is the converged (default → extra → declaration) final value, NOT a delta.
- * Consumers (config-generator, deriveGraphData) read these directly; they never
- * re-read raw .conf or fall back to defaults. This is a DISTINCT type from
- * SyncConfig.EXTRA_CONFIG (the manual-delta layer) — no shape overloading.
+ * FinalConf — the fully-merged result. Consumers read these directly.
+ * Distinct from SyncConfig.EXTRA_CONFIG (the manual-delta layer).
  */
 export interface FinalConnConfig {
   allowedIPs: string[]
@@ -165,18 +123,15 @@ export interface FinalConnConfig {
   keepalive?: number | null
 }
 export interface FinalPeerConfig {
-  // Identity (from the default layer / raw .conf — not converged fields).
   privateKey: string
   address: string[]
-  // Converged peer-level values (viewer-independent; relay'd IPs in ownAllowedIPs).
   comments?: string
-  endpoint?: string                       // peer's own endpoint (mesh-peer fallback base)
+  endpoint?: string
   dns?: string
   listenPort?: number | null
-  ownAllowedIPs: string[]                 // own address + relay'd IPs (declaration append)
-  scripts: Partial<Record<ScriptType, string>>   // incl. GLOBAL_SCRIPTS + proxy block
-  proxyList: string[]                     // proxied source IPs (for ExtraInfo / ewctl)
-  // This peer's view (as viewer) of each connection. key = target pubkey or 'CENTRAL_NODE'.
+  ownAllowedIPs: string[]
+  scripts: Partial<Record<ScriptType, string>>
+  proxyList: string[]
   conns: Record<string, FinalConnConfig>
 }
 export interface FinalConf {
@@ -200,7 +155,7 @@ function ownIPsOf(base: GraphBase, pubkey: string): string[] {
   return p?.default?.address ? [...p.default.address] : []
 }
 
-/** default-layer string per peer field (.conf + GLOBAL_*), mirrors PeerConfigModel.defaults. */
+/** default-layer string per peer field (.conf + GLOBAL_*). */
 function peerDefaults(d: DefaultPeerConfig | undefined, onlineEndpoint: string | undefined, ctx: BuildCtx): Record<string, string | null> {
   const g = ctx
   const dns = !g.globalDns ? null : (d?.dns?.length ? d.dns.join(', ') : null)
@@ -240,11 +195,7 @@ function pushDefault(hist: FieldHistory, defaultVal: string | null) {
   if (defaultVal) hist.push({ layer: 'default', op: 'override', value: defaultVal, origin: 'conf' })
 }
 
-/**
- * push the manual (extra) record — applied LAST, on top of default + all
- * declarations, so manual edits are the final say (@=append / none=delete /
- * value=override / empty=skip).
- */
+/** push the manual (extra) record. Applied LAST. @=append / none=delete / value=override. */
 function pushExtra(hist: FieldHistory, extraRaw: string | undefined) {
   if (extraRaw === undefined || extraRaw === null || extraRaw === '') return
   if (extraRaw === 'none') { hist.push({ layer: 'extra', op: 'none', value: '', origin: 'manual' }); return }
@@ -274,19 +225,15 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
     peers: {}, conns: {}, gatewayEdges: new Set(), proxies: new Set(), proxyLists: {}, connNoUnderlying: new Set(),
   }
 
-  // --- declaration queries (once) ---
-  const reach = topo.getRelayReachability()            // pubkey → reachable relayed nodes
-  const gatewayDecls = topo.getGatewayDeclarations()   // {PUBLIC, PRIVATE} with underlying conn
+  // Query topology once.
+  const reach = topo.getRelayReachability()
+  const gatewayDecls = topo.getGatewayDeclarations()
   const { v4, v6 } = topo.getDomainNetworks()
   const domainIPs = [v4, v6].filter(Boolean) as string[]
   const centerOwnIPs = topo.getCenterOwnIPs()
-  // Peers that explicitly roam via another exit — their implicit CENTER gateway
-  // is disabled (X→CENTER stays CENTER's host IP, no domain-network stack).
   const gatewayPrivate = topo.getExplicitGatewayPrivates()
 
-  // proxy: per PUBLIC node A, collect the source IPs of the privates it proxies
-  // (manual PROXY + roaming nat, underlying-connection filtered). The MASQUERADE
-  // is scoped to these source IPs, never the whole segment.
+  // Proxy: per PUBLIC node A, collect the source IPs of privates it proxies.
   const hm: any = config.HYBRID_MESH
   const proxySrcIPs = new Map<string, string[]>()   // A → proxied source IP CIDRs
   const addProxy = (pub: string, priv: string) => {
@@ -305,9 +252,7 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
 
   const centerPub = base.centerPubKey
 
-  // Gateway declarations WITHOUT an underlying connection (declared but cannot
-  // render) — for the panel's "missing connection" error. Raw enabled pairs
-  // minus those with an underlying connection.
+  // Gateway declarations without an underlying connection — for panel "missing connection" errors.
   for (const d of (hm?.DECLARATIONS?.GATEWAY || [])) {
     if (d.ENABLED !== false && !topo.hasUnderlyingConnection(d.PUBLIC_PEER, d.PRIVATE_PEER)) {
       model.connNoUnderlying.add(`${d.PRIVATE_PEER}|${d.PUBLIC_PEER}`)
@@ -326,7 +271,7 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
     const defs = peerDefaults(d, base.onlineEndpoints?.[pk], ctx)
     const exs = peerExtras(c)
 
-    // ---- Peer global fields ---- order: default → declarations → manual(last)
+    // Peer global fields: default → declarations → manual(last)
     const pf: Record<string, FieldHistory> = {}
     const FIELDS = ['COMMENTS', 'ENDPOINT', 'DNS', 'LISTEN_PORT', 'ALLOWED_IPS', 'PreUp', 'PostUp', 'PreDown', 'PostDown']
     for (const f of FIELDS) {
@@ -335,7 +280,7 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
       pf[f] = h
     }
 
-    // declaration: relay-propagated IPs (this node relays others → owns their IPs)
+    // relay-propagated IPs: this node relays others → owns their IPs
     const reachable = reach.get(pk)
     if (reachable && reachable.size > 0) {
       const own = new Set(ownIPsOf(base, pk))
@@ -351,8 +296,7 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
       }
     }
 
-    // declaration: proxy scripts (this node is a proxy PUBLIC) — MASQUERADE
-    // scoped to the proxied nodes' source IPs.
+    // proxy scripts: this node is a proxy PUBLIC — MASQUERADE for proxied source IPs.
     if (model.proxies.has(pk)) {
       const { up, down } = buildProxyScript(proxySrcIPs.get(pk) || [])
       pf.PostUp.push({ layer: 'declaration', op: 'append', value: up, origin: 'proxy' })
@@ -363,22 +307,16 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
 
     model.peers[pk] = pf
 
-    // ---- Connection: X → CENTER ----
-    // Model: default X→CENTER = CENTER's own /32+/128 (ordinary peer). A virtual
-    // CENTER Gateway (implicit, enabled unless X explicitly roams via someone
-    // else) stacks the domain network (/24+/80) on top → X treats CENTER as its
-    // gateway. When X explicitly roams via A, the virtual CENTER Gateway is
-    // disabled for X → no /24 stack → X→CENTER stays the ordinary /32+/128.
-    // (The /24 domain network is the virtual-gateway declaration layer, sourced
-    // from interfaceInfo.Address via getDomainNetworks — not a per-peer default.)
+    // X → CENTER: default=CENTER's own /32+/128 (ordinary peer).
+    // Virtual CENTER Gateway stacks domain network (/24+/80) unless X explicitly
+    // roams via another exit → X→CENTER stays ordinary peer.
     if (centerPub) {
       const key = `${pk}|CENTRAL_NODE`
       const cP2p = c?.P2P_CONFIG?.['CENTRAL_NODE']
       const allowedHist: FieldHistory = []
-      // default = CENTER's own host IPs (ordinary peer, not gateway)
+      // default = CENTER's own host IPs
       pushDefault(allowedHist, centerOwnIPs.length ? centerOwnIPs.join(', ') : null)
-      // declaration: virtual CENTER Gateway stacks the domain network (/24+/80)
-      // unless X explicitly roams via another exit (gatewayPrivate).
+      // virtual CENTER Gateway stacks domain network unless X explicitly roams
       if (!gatewayPrivate.has(pk) && domainIPs.length) {
         allowedHist.push({ layer: 'declaration', op: 'override', value: domainIPs.join(', '), origin: 'center-gateway' })
       }
@@ -391,12 +329,7 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
     }
   }
 
-  // ---- Connection: gateway edges X → A (whole-domain override) ----
-  // The conn's ALLOWED_IPS history = A's own peer history (default + relay +
-  // A's own manual — A's global declarations) + the gateway domain override +
-  // X's manual P2P override. converge sinks both manuals to the end, so the
-  // domain override wipes A's accumulated value, then A's manual + X's manual
-  // append on top in order.
+  // Gateway edges X → A: AllowedIPs = A's peer history + domain network override + X's P2P override.
   for (const gw of gatewayDecls) {
     const key = `${gw.PRIVATE_PEER}|${gw.PUBLIC_PEER}`
     model.gatewayEdges.add(`${gw.PRIVATE_PEER}->${gw.PUBLIC_PEER}`)
@@ -412,12 +345,7 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
     }
   }
 
-  // ---- Connection: plain mesh edges with a manual P2P override (src → tgt) ----
-  // Any EXTRA_CONFIG[src].P2P_CONFIG[tgt] not already modeled as CENTER/gateway
-  // is a per-viewer override on a plain mesh edge. The conn's ALLOWED_IPS
-  // history = tgt's own peer history (default + relay + tgt's own manual — tgt's
-  // global declarations) + src's manual P2P override. converge sinks the manuals
-  // to the end, so src's override appends on top of everything tgt declared.
+  // Plain mesh edges with a manual P2P override (src → tgt).
   for (const [src, ec] of Object.entries(EXTRA)) {
     const p2pAll = (ec as any)?.P2P_CONFIG
     if (!p2pAll) continue
@@ -439,7 +367,7 @@ export function buildHistories(base: GraphBase, config: SyncConfig): RenderModel
   return model
 }
 
-/** small helper: a 2-record history (default + manual) for scalar conn fields. */
+/** Helper: 2-record history (default + manual) for scalar conn fields. */
 function histOf(defaultVal: string | null, extraRaw: string | undefined): FieldHistory {
   const h: FieldHistory = []
   pushDefault(h, defaultVal)
@@ -448,25 +376,15 @@ function histOf(defaultVal: string | null, extraRaw: string | undefined): FieldH
 }
 
 // =========================================================================
-// renderConfig — the ONE renderer for generation/graph. buildHistories +
-// converge → a SyncConfig whose EXTRA_CONFIG holds the rendered values, in the
-// shape config-generator + deriveGraphData consume. Replaces renderHybridMesh.
-//
-// Emits a field ONLY when something beyond the default contributed (a manual or
-// declaration record) — reproducing the old "EXTRA_CONFIG = deltas on the raw
-// .conf" semantics — EXCEPT X→CENTER ALLOWED_IPS, which is always materialized
-// (matching the old renderer, so the GW marker / generation see /24 or /32).
+// renderConfig — fold all changelogs → FinalConf.
+// Emits a field only when something beyond the default contributed, EXCEPT
+// X→CENTER ALLOWED_IPS which is always materialized so the GW marker sees it.
 // A converged null → 'none' (config-generator drops the key/line).
 // =========================================================================
 
 const SCRIPT_F: ScriptType[] = ['PreUp', 'PostUp', 'PreDown', 'PostDown']
 
-/**
- * Drop byte-identical duplicate CIDRs from a final AllowedIPs list, preserving
- * order + first occurrence. Containment (e.g. 192.168.222.0/24 + .0/32) is KEPT
- * — only an exactly-equal entry (.0/32 appearing twice) collapses. Applied to
- * the final merged output only; the live preview keeps every history record.
- */
+/** Drop exact-duplicate CIDRs from the final AllowedIPs, preserving order. */
 function dedupExactCIDRs(list: string[]): string[] {
   const seen = new Set<string>()
   const out: string[] = []
@@ -483,9 +401,7 @@ export function renderConfig(base: GraphBase, draft: SyncConfig, prebuilt?: Rend
   const model = prebuilt || buildHistories(base, draft)
   const defaultOf = (pk: string) => base.basePeers.find(b => b.publicKey === pk)?.default
 
-  // The merge: every field converged (default → extra → declaration) into its
-  // final value. Output a distinct FinalConf — never the SyncConfig.EXTRA_CONFIG
-  // shape — so consumers read finals directly, never re-reading raw sources.
+  // Fold all peer fields into FinalPeerConfig
   const peers: Record<string, FinalPeerConfig> = {}
   const peerOf = (pk: string): FinalPeerConfig => {
     if (!peers[pk]) {
@@ -588,13 +504,12 @@ export function convergeField(model: RenderModel, scope: 'peers' | 'conns', id: 
 }
 
 // =========================================================================
-// Adapter: build the legacy ConnectionDeclaration shape from the RenderModel
-// (zero re-render) for the EdgeEditPanel's gateway/readonly UI flags.
+// Adapter: build ConnectionDeclaration from the RenderModel (zero re-render).
 // =========================================================================
 
 import type { ConnectionDeclaration } from '~/types'
 
-/** Declaration-layer supplement for a connection (source→key edge), from the RenderModel. */
+/** Declaration-layer supplement for a connection (source→key edge). */
 export function connDeclOf(model: RenderModel, source: string, target: string, key: string): ConnectionDeclaration {
   const empty: ConnectionDeclaration = {
     isGatewayDeclared: false, gatewayDomainIPs: [], relayIPs: [], readonly: false, noUnderlyingConnection: false,
@@ -609,8 +524,7 @@ export function connDeclOf(model: RenderModel, source: string, target: string, k
     return { isGatewayDeclared: true, gatewayDomainIPs, relayIPs: [], readonly: true, noUnderlyingConnection }
   }
 
-  // Virtual CENTER Gateway stacks the domain network on the X→CENTER edge when
-  // X hasn't explicitly roamed via another exit (origin 'center-gateway').
+  // Virtual CENTER Gateway stacks domain network on X→CENTER unless X roams elsewhere.
   if (key === 'CENTRAL_NODE') {
     const hist = model.conns[`${source}|CENTRAL_NODE`]?.ALLOWED_IPS || []
     const cg = hist.find(m => m.layer === 'declaration' && m.origin === 'center-gateway')

@@ -1,18 +1,9 @@
-// composables/useHealthFull.ts
+// Dynamic full health check — renders every node's real config via mock-config
+// and inspects routing tables per-node. O(n²), triggered manually.
 //
-// DYNAMIC ("完整") health check — renders every node's REAL generated config
-// (via /api/admin/mock-config from the current draft) and inspects the actual
-// routing tables from each node's own perspective. This is the heavy O(n²)
-// check, triggered manually (not on every draft change).
-//
-// Two checks:
-//   1. duplicates  — within a single node's config, the SAME AllowedIPs entry
-//                    (exact string, NOT prefix coverage) appears in 2+ peers, so
-//                    WireGuard cannot decide which peer owns that route.
-//   2. unreachable — for every ordered pair (src → tgt), simulate longest-prefix
-//                    routing through the rendered configs (multi-hop). ONE-WAY
-//                    only (no return-path / symmetry check). Report pairs the
-//                    source cannot route to.
+// 1. duplicates  — same AllowedIPs entry in 2+ peers at a single node
+// 2. unreachable — for each ordered pair, simulate longest-prefix routing
+//    (one-way per address family; asymmetry is OK through CENTER NAT)
 
 import { parseWireGuardConfig, tracePath, centerRoutingConfig, extractIP, extractCenterOwnIPs, buildPubkeyToId, type ParsedWireGuardConfig } from '~/composables/useWgConfigParser'
 import { useDraft } from '~/composables/useDraft'
@@ -20,10 +11,7 @@ import { authFetch } from '~/composables/useAuth'
 import type { SyncConfig } from '~/types'
 
 /**
- * Fetch one peer's rendered WireGuard config (via /api/admin/mock-config) and
- * parse it. Returns null on fetch failure / empty config. Shared by health
- * (parallel batch) + TraceRoutePanel (per-hop on demand). CENTER handling is
- * the caller's concern (CENTER has no peer .conf — use centerRoutingConfig).
+ * Fetch one peer's rendered WG config, parse it. CENTER callers handle separately.
  */
 export async function fetchParsedConfig(peerName: string, draft: SyncConfig): Promise<ParsedWireGuardConfig | null> {
   try {
@@ -101,12 +89,7 @@ export async function runFullHealthCheck(graphData: any): Promise<FullHealthResu
     else failed.push({ id: p.id, name: p.name })
   }))
 
-  // CENTER is the WG hub: it has a [Peer] for every node (each /32) and thus
-  // covers the whole domain. Model that real routing table (shared builder) and
-  // add it to the config map + pubkey index, so a trace landing on CENTER routes
-  // on to the destination peer — no hardcoded "reaching CENTER = done" shortcut.
-  // CENTER NAT: a packet forwarded out of CENTER has its source rewritten to
-  // CENTER's own IPv4 (MASQUERADE). Used by tracePath.
+  // CENTER routing: simulated [Peer] for every node, + NAT source rewrite.
   const centerNode = nodes.find(n => n.data?.isCenter)
   let centerId: string | undefined
   let centerOwnIpV4: string | undefined
@@ -119,7 +102,7 @@ export async function runFullHealthCheck(graphData: any): Promise<FullHealthResu
     centerOwnIpV6 = own.v6 || undefined
   }
 
-  // --- Check 1: exact-duplicate AllowedIPs within a single node's config ---
+  // Check 1: exact-duplicate AllowedIPs within a single node's config.
   const duplicates: DuplicateFinding[] = []
   for (const p of peers) {
     const conf = configs.get(p.id)
@@ -135,7 +118,7 @@ export async function runFullHealthCheck(graphData: any): Promise<FullHealthResu
       }
     }
     for (const [cidr, pubkeys] of byCidr) {
-      if (pubkeys.size < 2) continue   // coverage (different CIDRs) is fine — only exact dups count
+      if (pubkeys.size < 2) continue
       duplicates.push({
         node: p.id,
         nodeName: p.name,
@@ -145,12 +128,7 @@ export async function runFullHealthCheck(graphData: any): Promise<FullHealthResu
     }
   }
 
-  // --- Check 2: O(n²) reachability — bidirectional per family, asymmetric is OK ---
-  // For each family (v4, v6) both peers have, BOTH directions must resolve
-  // (forward src→tgt and return tgt→src). Asymmetric paths are NOT errors here
-  // (NAT through CENTER makes asymmetry legitimate); only a dead direction
-  // reports. Each direction models CENTER-NAT (source → CENTER's own IP on
-  // egress) + cryptokey source-acceptance.
+  // Check 2: O(n²) reachability — bidirectional per family, asymmetric is OK.
   const unreachable: UnreachableFinding[] = []
   const checkPair = async (src: NodeMeta, tgt: NodeMeta, family: 'v4' | 'v6') => {
     const srcIp = family === 'v4' ? src.ipv4 : src.ipv6
